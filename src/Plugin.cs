@@ -1,42 +1,54 @@
 ﻿using BepInEx;
+using SlugBase.DataTypes;
 using SlugBase.Features;
-using UnityEngine;
-using Weaver.Mouse;
-using Weaver.Silk;
+using tinker.Mouse;
+using tinker.Silk;
+using Tinker.PlayerRender;
+using Weaver.Silk.Bridge;
 using static SlugBase.Features.FeatureTypes;
 
-namespace Weaver
+namespace tinker
 {
-    [BepInPlugin("abysslasea.weaver", "Weaver", "0.0.1")]
+    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.1.0")]
     public class Plugin : BaseUnityPlugin
     {
-        public const string MOD_ID = "abysslasea.weaver";
-        public const string SlugName = "weaver";
+        public const string MOD_ID = "abysslasea.tinker";
+        public const string SlugName = "tinker";
         public static Plugin Instance;
+        public static BepInEx.Logging.ManualLogSource Logger;
         public static PlayerFeature<bool> MouseAiming;
         public static PlayerFeature<bool> SilkFeatureEnabled;
+        public static readonly PlayerFeature<PlayerColor> AntennaBaseColor = PlayerCustomColor("AntennaBase");
+        public static readonly PlayerFeature<PlayerColor> AntennaTipColor = PlayerCustomColor("AntennaTip");
 
         public void OnEnable()
         {
             Instance = this;
+            Logger = base.Logger;
 
-            MouseAiming = PlayerBool("weaver/mouse_aiming");
-            SilkFeatureEnabled = PlayerBool("weaver/silk_enabled");
+            MouseAiming = PlayerBool("tinker/mouse_aiming");
+            SilkFeatureEnabled = PlayerBool("tinker/silk_enabled");
 
-            WeaverSilkData.Initialize();
+            tinkerSilkData.Initialize();
             SilkAimInput.Initialize();
             MouseAimSystem.Initialize();
             MouseRender.Initialize();
+            SilkBridgeManager.Initialize();
+            SilkBridgeGraphics.Initialize();
+            AntennaManager.Init();
 
             On.Player.Update += Player_Update;
         }
 
+
         public void OnDisable()
         {
             SilkAimInput.Cleanup();
-            WeaverSilkData.Cleanup();
+            tinkerSilkData.Cleanup();
             MouseAimSystem.Cleanup();
             MouseRender.Cleanup();
+            AntennaManager.Cleanup();
+
             On.Player.Update -= Player_Update;
             Instance = null;
         }
@@ -46,14 +58,10 @@ namespace Weaver
             orig(self, eu);
 
             if (self.graphicsModule == null)
-            {
                 self.InitiateGraphicsModule();
-            }
 
             if (MouseAiming.TryGet(self, out bool mouseEnabled) && mouseEnabled)
-            {
                 MouseAimSystem.SetMouseAimEnabled(true, self);
-            }
         }
     }
 }

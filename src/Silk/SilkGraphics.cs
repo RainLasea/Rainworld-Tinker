@@ -1,7 +1,8 @@
 ﻿using RWCustom;
+using System.Collections.Generic;
 using UnityEngine;
 
-namespace Weaver.Silk
+namespace tinker.Silk
 {
     public class SilkGraphics
     {
@@ -9,35 +10,50 @@ namespace Weaver.Silk
         public SilkPhysics silk;
 
         private TriangleMesh lineMesh;
-        private FSprite tipSprite;
-        private FSprite anchorSprite;
-        private FSprite glowSprite;
         private FSprite tensionIndicator;
         private FSprite pullIndicator;
         private bool spritesInitiated;
         private RoomCamera currentCamera;
 
-        private bool wasVisible;
         private SilkMode lastDrawnMode;
         private bool wasPulling;
 
         private float currentTension;
         private float displayedTension;
 
-        private const int ROPE_SEGMENTS = 12;
-        private Vector2[] ropePoints;
+        private const int MAX_ROPE_RENDER_SEGMENTS = 50;
+        private Vector2[] ropeRenderPoints;
+
+
+        private bool fadingActive;
+        private List<Vector2> fadingPath;
+        private Vector2[] fadingPositions;
+        private Vector2[] fadingVelocities;
+        private float fadeAlpha;
+        private float fadeThickness;
+        private float fadeSwayPhase;
+        private const float FADE_ALPHA_DECAY = 0.02f;
+        private const float FADE_THICKNESS_DECAY = 0.02f;
+        private const float FADE_GRAVITY = 0.15f;
+        private List<Vector2> lastRenderedPathCache;
 
         public SilkGraphics(Player player)
         {
             this.player = player;
-            this.silk = WeaverSilkData.Get(player);
-            this.wasVisible = false;
+            this.silk = tinkerSilkData.Get(player);
             this.lastDrawnMode = SilkMode.Retracted;
             this.wasPulling = false;
-            this.ropePoints = new Vector2[ROPE_SEGMENTS];
+            this.ropeRenderPoints = new Vector2[MAX_ROPE_RENDER_SEGMENTS];
             this.spritesInitiated = false;
             this.currentTension = 0f;
             this.displayedTension = 0f;
+
+            fadingActive = false;
+            fadingPath = null;
+            fadeAlpha = 0f;
+            fadeThickness = 0f;
+            fadeSwayPhase = 0f;
+            lastRenderedPathCache = null;
         }
 
         public void InitiateSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam)
@@ -46,8 +62,8 @@ namespace Weaver.Silk
 
             currentCamera = rCam;
 
-            TriangleMesh.Triangle[] tris = new TriangleMesh.Triangle[(ROPE_SEGMENTS - 1) * 2];
-            for (int i = 0; i < ROPE_SEGMENTS - 1; i++)
+            TriangleMesh.Triangle[] tris = new TriangleMesh.Triangle[(MAX_ROPE_RENDER_SEGMENTS - 1) * 2];
+            for (int i = 0; i < MAX_ROPE_RENDER_SEGMENTS - 1; i++)
             {
                 int vertIndex = i * 4;
                 tris[i * 2] = new TriangleMesh.Triangle(vertIndex, vertIndex + 1, vertIndex + 2);
@@ -57,45 +73,21 @@ namespace Weaver.Silk
             lineMesh = new TriangleMesh("Futile_White", tris, false, false);
             lineMesh.color = Color.white;
             lineMesh.isVisible = false;
+            lineMesh.shader = rCam.game.rainWorld.Shaders["Basic"];
 
-            tipSprite = new FSprite("Circle20", true);
-            tipSprite.color = Color.white;
-            tipSprite.scale = 0.5f;
-            tipSprite.isVisible = false;
-
-            anchorSprite = new FSprite("Circle20", true);
-            anchorSprite.color = Color.white;
-            anchorSprite.scale = 0.4f;
-            anchorSprite.isVisible = false;
-
-            glowSprite = new FSprite("Futile_White", true);
-            glowSprite.shader = rCam.game.rainWorld.Shaders["FlatLight"];
-            glowSprite.scale = 0.6f;
-            glowSprite.alpha = 0.5f;
-            glowSprite.isVisible = false;
-
-            tensionIndicator = new FSprite("pixel", true);
+            tensionIndicator = CreateSprite("pixel", Color.yellow, 1f);
             tensionIndicator.scaleX = 30f;
             tensionIndicator.scaleY = 3f;
-            tensionIndicator.color = Color.yellow;
             tensionIndicator.alpha = 0f;
-            tensionIndicator.isVisible = false;
 
-            pullIndicator = new FSprite("Futile_White", true);
+            pullIndicator = CreateSprite("Futile_White", new Color(0.3f, 1f, 0.3f), 1.2f);
             pullIndicator.shader = rCam.game.rainWorld.Shaders["FlatLight"];
-            pullIndicator.scale = 1.2f;
-            pullIndicator.color = new Color(0.3f, 1f, 0.3f);
             pullIndicator.alpha = 0f;
-            pullIndicator.isVisible = false;
 
             FContainer midground = rCam.ReturnFContainer("Midground");
             FContainer hud = rCam.ReturnFContainer("HUD");
 
-            midground.AddChild(lineMesh);
-            midground.AddChild(tipSprite);
-            midground.AddChild(anchorSprite);
-            midground.AddChild(glowSprite);
-            midground.AddChild(pullIndicator);
+            AddToContainer(midground, lineMesh, pullIndicator);
             hud.AddChild(tensionIndicator);
 
             spritesInitiated = true;
@@ -103,12 +95,16 @@ namespace Weaver.Silk
 
         public void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
-            if (!spritesInitiated) return;
-
-            if (player == null || player.slatedForDeletetion || silk == null)
+            if (!spritesInitiated || player == null || player.slatedForDeletetion || silk == null)
             {
                 HideAllSprites();
                 return;
+            }
+
+
+            if (!fadingActive && lastDrawnMode != SilkMode.Retracted && silk.mode == SilkMode.Retracted && lastRenderedPathCache != null && lastRenderedPathCache.Count >= 2)
+            {
+                StartFadeFromPath(lastRenderedPathCache);
             }
 
             Vector2 headPos = Vector2.Lerp(player.bodyChunks[0].lastPos, player.bodyChunks[0].pos, timeStacker);
@@ -117,28 +113,60 @@ namespace Weaver.Silk
             float distance = Vector2.Distance(headPos, silkTipPos);
             UpdateTension(distance);
 
-            bool shouldBeVisible = silk.mode != SilkMode.Retracted &&
-                                  silk.mode != SilkMode.Retracting &&
-                                  distance >= 3f;
+            bool ropeShouldBeVisible = silk.mode != SilkMode.Retracted && silk.mode != SilkMode.Retracting && distance >= 3f;
 
-            wasVisible = shouldBeVisible;
-            lastDrawnMode = silk.mode;
             wasPulling = silk.pullingObject;
 
-            UpdateAnchor(headPos, camPos);
-
-            if (shouldBeVisible)
+            if (ropeShouldBeVisible && !fadingActive)
             {
-                UpdateSilkLine(headPos, silkTipPos, camPos, distance);
+                UpdateSilkLine(headPos, silkTipPos, camPos);
+
+                CacheCurrentRenderPath();
+            }
+            else if (fadingActive)
+            {
+                UpdateFadingSilkLine(camPos);
             }
             else
             {
                 lineMesh.isVisible = false;
-                tipSprite.isVisible = false;
             }
 
             UpdateTensionIndicator(headPos, camPos);
             UpdatePullIndicator(silkTipPos, camPos);
+
+
+            lastDrawnMode = silk.mode;
+        }
+
+        private void CacheCurrentRenderPath()
+        {
+            var path = silk.GetRopePath();
+            if (path != null && path.Count >= 2)
+            {
+                lastRenderedPathCache = new List<Vector2>(path);
+            }
+        }
+
+        private void StartFadeFromPath(List<Vector2> path)
+        {
+            fadingPath = new List<Vector2>(path);
+            int count = Mathf.Min(MAX_ROPE_RENDER_SEGMENTS, fadingPath.Count);
+            fadingPositions = new Vector2[count];
+            fadingVelocities = new Vector2[count];
+
+            for (int i = 0; i < count; i++)
+            {
+                fadingPositions[i] = fadingPath[i];
+                float randX = (Random.value - 0.5f) * 1.2f;
+                float randY = -Random.Range(0.2f, 0.6f);
+                fadingVelocities[i] = new Vector2(randX, randY);
+            }
+
+            fadeAlpha = 1f;
+            fadeThickness = 1f;
+            fadeSwayPhase = Random.Range(0f, 6.28318f);
+            fadingActive = true;
         }
 
         private void UpdateTension(float distance)
@@ -151,8 +179,8 @@ namespace Weaver.Silk
             }
 
             float overExtension = Mathf.Max(0f, distance - silk.requestedRopeLength);
-            currentTension = Mathf.Clamp01(overExtension / 100f);
-            displayedTension = Mathf.Lerp(displayedTension, currentTension, 0.15f);
+            currentTension = overExtension == 0f ? 0f : Mathf.Clamp01(overExtension / 100f);
+            displayedTension = Mathf.Lerp(displayedTension, currentTension, 0.6f);
         }
 
         private void UpdateTensionIndicator(Vector2 headPos, Vector2 camPos)
@@ -185,75 +213,135 @@ namespace Weaver.Silk
             float pulse = 0.6f + Mathf.Sin(Time.time * 8f) * 0.4f;
             pullIndicator.scale = pulse * 1.5f;
             pullIndicator.alpha = pulse * 0.7f;
-            pullIndicator.color = new Color(0.3f, 1f, 0.3f, 0.8f);
         }
 
-        private void UpdateAnchor(Vector2 headPos, Vector2 camPos)
-        {
-            bool showAnchor = silk.mode != SilkMode.Retracted && silk.mode != SilkMode.Retracting;
-            anchorSprite.isVisible = showAnchor;
-            glowSprite.isVisible = showAnchor;
-
-            if (!showAnchor) return;
-
-            anchorSprite.x = headPos.x - camPos.x;
-            anchorSprite.y = headPos.y - camPos.y;
-            glowSprite.x = anchorSprite.x;
-            glowSprite.y = anchorSprite.y;
-
-            Color anchorColor = GetPlayerColor();
-
-            switch (silk.mode)
-            {
-                case SilkMode.ShootingOut:
-                    anchorColor.a = 0.9f;
-                    anchorSprite.scale = 0.45f;
-                    glowSprite.scale = 0.7f;
-                    break;
-
-                case SilkMode.AttachedToTerrain:
-                case SilkMode.AttachedToObject:
-                    anchorColor.a = 1f;
-                    float pulse = 0.4f + Mathf.Sin(Time.time * 4f) * 0.1f;
-                    anchorSprite.scale = pulse;
-
-                    if (silk.pullingObject)
-                    {
-                        pulse = 0.5f + Mathf.Sin(Time.time * 10f) * 0.15f;
-                        anchorSprite.scale = pulse;
-                        glowSprite.scale = pulse * 2.2f;
-                        anchorColor = Color.Lerp(anchorColor, Color.green, 0.3f);
-                    }
-                    else
-                    {
-                        glowSprite.scale = pulse * (1.8f + displayedTension * 0.5f);
-                    }
-                    break;
-            }
-
-            anchorSprite.color = anchorColor;
-            Color glowColor = silk.pullingObject ? Color.Lerp(anchorColor, Color.green, 0.4f) : Color.Lerp(anchorColor, Color.red, displayedTension * 0.5f);
-            glowSprite.color = new Color(glowColor.r, glowColor.g, glowColor.b, 0.4f);
-        }
-
-        private void UpdateSilkLine(Vector2 startPos, Vector2 endPos, Vector2 camPos, float distance)
+        private void UpdateSilkLine(Vector2 startPos, Vector2 endPos, Vector2 camPos)
         {
             lineMesh.isVisible = true;
-            tipSprite.isVisible = true;
-            CalculateRopePoints(startPos, endPos, distance);
+
+            List<Vector2> ropePath = silk.GetRopePath();
+            CalculateRenderPointsFromPath(ropePath);
 
             float baseWidth = 3f;
             float width = silk.pullingObject ? baseWidth * 1.2f : baseWidth * (1f + displayedTension * 0.4f);
-
             if (silk.mode == SilkMode.ShootingOut) width = baseWidth * 0.8f;
 
-            for (int i = 0; i < ROPE_SEGMENTS - 1; i++)
+            int segmentCount = UpdateMeshVertices(width, camPos);
+            ClearUnusedVertices(segmentCount);
+
+            lineMesh.color = GetSilkColor();
+            lineMesh.alpha = 1f;
+        }
+
+        private void UpdateFadingSilkLine(Vector2 camPos)
+        {
+            if (!fadingActive || fadingPositions == null)
             {
-                Vector2 segStart = ropePoints[i];
-                Vector2 segEnd = ropePoints[i + 1];
+                lineMesh.isVisible = false;
+                return;
+            }
+
+            lineMesh.isVisible = true;
+            fadeSwayPhase += 0.05f;
+
+            int count = fadingPositions.Length;
+            for (int i = 0; i < count; i++)
+            {
+                Vector2 vel = fadingVelocities[i];
+                vel.y -= FADE_GRAVITY * 0.3f;
+                vel.x *= 0.99f;
+
+                float sway = Mathf.Sin(fadeSwayPhase + i * 0.35f) * 0.4f * fadeAlpha;
+                vel.x += sway * 0.02f;
+
+                fadingVelocities[i] = vel;
+                fadingPositions[i] += vel;
+            }
+
+            for (int i = 0; i < MAX_ROPE_RENDER_SEGMENTS; i++)
+                ropeRenderPoints[i] = Vector2.zero;
+
+            if (count >= 2)
+            {
+                ropeRenderPoints[0] = fadingPositions[0];
+                ropeRenderPoints[MAX_ROPE_RENDER_SEGMENTS - 1] = fadingPositions[count - 1];
+
+                for (int i = 1; i < MAX_ROPE_RENDER_SEGMENTS - 1; i++)
+                {
+                    float t = (float)i / (MAX_ROPE_RENDER_SEGMENTS - 1);
+                    float sourceIndexF = t * (count - 1);
+                    int idxA = Mathf.FloorToInt(sourceIndexF);
+                    int idxB = Mathf.Min(count - 1, idxA + 1);
+                    float localT = sourceIndexF - idxA;
+                    ropeRenderPoints[i] = Vector2.Lerp(fadingPositions[idxA], fadingPositions[idxB], localT);
+                }
+            }
+
+            float baseWidth = 3f * fadeThickness;
+            int segmentCount = 0;
+
+            for (int i = 0; i < MAX_ROPE_RENDER_SEGMENTS - 1; i++)
+            {
+                if (ropeRenderPoints[i] == Vector2.zero && ropeRenderPoints[i + 1] == Vector2.zero)
+                    break;
+
+                Vector2 segStart = ropeRenderPoints[i];
+                Vector2 segEnd = ropeRenderPoints[i + 1];
+                if (segStart == Vector2.zero || segEnd == Vector2.zero) break;
+
                 Vector2 segDir = (segEnd - segStart).normalized;
                 Vector2 perpendicular = Custom.PerpendicularVector(segDir);
-                float segmentT = (float)i / (ROPE_SEGMENTS - 1);
+                float segmentT = (float)i / (MAX_ROPE_RENDER_SEGMENTS - 1);
+
+                float widthMultiplier = (1f - Mathf.Abs(segmentT * 2f - 1f) * 0.4f) * (1f - segmentT * 0.15f);
+                float segmentWidth = baseWidth * Mathf.Clamp01(widthMultiplier);
+
+                int vertIndex = i * 4;
+                lineMesh.MoveVertice(vertIndex, segStart - perpendicular * segmentWidth * 0.5f - camPos);
+                lineMesh.MoveVertice(vertIndex + 1, segStart + perpendicular * segmentWidth * 0.5f - camPos);
+                lineMesh.MoveVertice(vertIndex + 2, segEnd - perpendicular * segmentWidth * 0.5f - camPos);
+                lineMesh.MoveVertice(vertIndex + 3, segEnd + perpendicular * segmentWidth * 0.5f - camPos);
+
+                segmentCount++;
+            }
+
+            ClearUnusedVertices(segmentCount);
+
+            Color baseColor = new Color(1f, 1f - 0.4f * (1f - fadeAlpha), 1f - 0.6f * (1f - fadeAlpha), fadeAlpha);
+            lineMesh.color = baseColor;
+            lineMesh.alpha = fadeAlpha;
+
+            fadeAlpha = Mathf.Max(0f, fadeAlpha - FADE_ALPHA_DECAY);
+            fadeThickness = Mathf.Max(0f, fadeThickness - FADE_THICKNESS_DECAY);
+
+            if (fadeAlpha <= 0f || fadeThickness <= 0f)
+            {
+                fadingActive = false;
+                fadingPath = null;
+                fadingPositions = null;
+                fadingVelocities = null;
+                lineMesh.isVisible = false;
+                lastRenderedPathCache = null;
+            }
+        }
+
+        private int UpdateMeshVertices(float width, Vector2 camPos)
+        {
+            int segmentCount = 0;
+            for (int i = 0; i < MAX_ROPE_RENDER_SEGMENTS - 1; i++)
+            {
+                if (ropeRenderPoints[i] == Vector2.zero && ropeRenderPoints[i + 1] == Vector2.zero)
+                    break;
+
+                Vector2 segStart = ropeRenderPoints[i];
+                Vector2 segEnd = ropeRenderPoints[i + 1];
+
+                if (segStart == Vector2.zero || segEnd == Vector2.zero)
+                    break;
+
+                Vector2 segDir = (segEnd - segStart).normalized;
+                Vector2 perpendicular = Custom.PerpendicularVector(segDir);
+                float segmentT = (float)i / (MAX_ROPE_RENDER_SEGMENTS - 1);
                 float widthMultiplier = 1f - Mathf.Abs(segmentT * 2f - 1f) * 0.3f;
                 float segmentWidth = width * widthMultiplier;
 
@@ -262,131 +350,127 @@ namespace Weaver.Silk
                 lineMesh.MoveVertice(vertIndex + 1, segStart + perpendicular * segmentWidth * 0.5f - camPos);
                 lineMesh.MoveVertice(vertIndex + 2, segEnd - perpendicular * segmentWidth * 0.5f - camPos);
                 lineMesh.MoveVertice(vertIndex + 3, segEnd + perpendicular * segmentWidth * 0.5f - camPos);
-            }
 
-            Color silkColor = GetPlayerColor();
-            float alpha = 1f;
+                segmentCount++;
+            }
+            return segmentCount;
+        }
+
+        private void ClearUnusedVertices(int segmentCount)
+        {
+            for (int i = segmentCount; i < MAX_ROPE_RENDER_SEGMENTS - 1; i++)
+            {
+                int vertIndex = i * 4;
+                lineMesh.MoveVertice(vertIndex, Vector2.zero);
+                lineMesh.MoveVertice(vertIndex + 1, Vector2.zero);
+                lineMesh.MoveVertice(vertIndex + 2, Vector2.zero);
+                lineMesh.MoveVertice(vertIndex + 3, Vector2.zero);
+            }
+        }
+
+        private Color GetSilkColor()
+        {
+            Color silkColor = Color.white;
 
             if (silk.pullingObject)
-            {
                 silkColor = Color.Lerp(silkColor, new Color(0.3f, 1f, 0.3f), 0.4f);
-                alpha = 0.95f + Mathf.Sin(Time.time * 12f) * 0.05f;
-            }
             else
-            {
                 silkColor = Color.Lerp(silkColor, new Color(1f, 0.3f, 0.3f), displayedTension * 0.6f);
 
-                switch (silk.mode)
-                {
-                    case SilkMode.ShootingOut:
-                        alpha = 0.95f * (0.9f + Mathf.Sin(Time.time * 15f) * 0.1f);
-                        break;
-
-                    case SilkMode.AttachedToTerrain:
-                    case SilkMode.AttachedToObject:
-                        alpha = 1f;
-                        alpha *= displayedTension > 0.5f ? 0.95f + Mathf.Sin(Time.time * 8f) * 0.05f : 0.95f + Mathf.Sin(Time.time * 3f) * 0.05f;
-                        break;
-                }
-            }
-
-            silkColor.a = alpha;
-            lineMesh.color = silkColor;
-
-            tipSprite.x = endPos.x - camPos.x;
-            tipSprite.y = endPos.y - camPos.y;
-            tipSprite.scale = (width / 10f) * 1.5f;
-            tipSprite.color = silkColor;
-
-            if (silk.Attached) tipSprite.rotation += silk.pullingObject ? 15f : 5f;
-            else tipSprite.rotation = Custom.VecToDeg(endPos - startPos);
+            silkColor.a = 1f;
+            return silkColor;
         }
 
-        private void CalculateRopePoints(Vector2 start, Vector2 end, float distance)
+        private void CalculateRenderPointsFromPath(List<Vector2> ropePath)
         {
-            for (int i = 0; i < ROPE_SEGMENTS; i++)
-            {
-                float t = (float)i / (ROPE_SEGMENTS - 1);
-                Vector2 point = Vector2.Lerp(start, end, t);
+            for (int i = 0; i < MAX_ROPE_RENDER_SEGMENTS; i++)
+                ropeRenderPoints[i] = Vector2.zero;
 
-                if (silk.mode == SilkMode.ShootingOut)
+            if (ropePath.Count < 2) return;
+
+            float totalLength = 0f;
+            for (int i = 0; i < ropePath.Count - 1; i++)
+                totalLength += Vector2.Distance(ropePath[i], ropePath[i + 1]);
+
+            if (totalLength < 0.1f) return;
+
+            DistributeRenderPointsAlongPath(ropePath, totalLength);
+        }
+
+        private void DistributeRenderPointsAlongPath(List<Vector2> ropePath, float totalLength)
+        {
+            int renderPointIndex = 0;
+            float currentDistance = 0f;
+            float segmentLength = totalLength / (MAX_ROPE_RENDER_SEGMENTS - 1);
+
+            ropeRenderPoints[renderPointIndex++] = ropePath[0];
+
+            for (int pathIndex = 0; pathIndex < ropePath.Count - 1 && renderPointIndex < MAX_ROPE_RENDER_SEGMENTS; pathIndex++)
+            {
+                Vector2 segStart = ropePath[pathIndex];
+                Vector2 segEnd = ropePath[pathIndex + 1];
+                float segDist = Vector2.Distance(segStart, segEnd);
+
+                while (currentDistance + segDist >= segmentLength * renderPointIndex && renderPointIndex < MAX_ROPE_RENDER_SEGMENTS)
                 {
-                    float sag = Mathf.Sin(t * Mathf.PI) * (distance * 0.02f);
-                    point.y -= sag;
-                }
-                else if (silk.Attached)
-                {
-                    if (silk.pullingObject)
+                    float targetDist = segmentLength * renderPointIndex;
+                    float remainingDist = targetDist - currentDistance;
+                    float t = remainingDist / segDist;
+
+                    Vector2 point = Vector2.Lerp(segStart, segEnd, t);
+
+                    if (silk.Attached && !silk.pullingObject)
                     {
-                        float sag = Mathf.Sin(t * Mathf.PI) * (distance * 0.01f);
+                        float pathT = (float)renderPointIndex / (MAX_ROPE_RENDER_SEGMENTS - 1);
+                        float sag = Mathf.Sin(pathT * Mathf.PI) * (totalLength * 0.03f);
                         point.y -= sag;
-                        float shake = Mathf.Sin(Time.time * 20f + t * 10f) * 0.5f;
-                        point.x += shake;
                     }
-                    else
-                    {
-                        float slack = Mathf.Max(0, distance - silk.requestedRopeLength);
-                        float baseSag = Mathf.Sin(t * Mathf.PI) * (distance * 0.05f);
-                        float slackSag = Mathf.Sin(t * Mathf.PI) * Mathf.Min(slack * 0.3f, distance * 0.15f);
-                        point.y -= baseSag + slackSag;
 
-                        if (silk.attachedTime > 10) point.x += Mathf.Sin(Time.time * 2f + t * Mathf.PI) * (slack * 0.1f);
-                    }
+                    ropeRenderPoints[renderPointIndex++] = point;
+                    if (renderPointIndex >= MAX_ROPE_RENDER_SEGMENTS) break;
                 }
 
-                ropePoints[i] = point;
+                currentDistance += segDist;
             }
+
+            if (renderPointIndex < MAX_ROPE_RENDER_SEGMENTS)
+                ropeRenderPoints[MAX_ROPE_RENDER_SEGMENTS - 1] = ropePath[ropePath.Count - 1];
         }
 
-        public void AddToContainer(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, FContainer newContainer) { }
-
-        private Color GetPlayerColor()
+        private FSprite CreateSprite(string element, Color color, float scale)
         {
-            if (player?.graphicsModule is PlayerGraphics playerGraphics)
-            {
-                try
-                {
-                    Color baseColor = PlayerGraphics.SlugcatColor(playerGraphics.CharacterForColor);
-                    return new Color(
-                        Mathf.Min(baseColor.r * 1.3f + 0.1f, 1f),
-                        Mathf.Min(baseColor.g * 1.3f + 0.1f, 1f),
-                        Mathf.Min(baseColor.b * 1.3f + 0.1f, 1f),
-                        1f
-                    );
-                }
-                catch { }
-            }
-            return new Color(0.9f, 0.9f, 1f, 1f);
+            var sprite = new FSprite(element, true);
+            sprite.color = color;
+            sprite.scale = scale;
+            sprite.isVisible = false;
+            return sprite;
         }
 
-        private void HideAllSprites()
+        public void AddToContainer(FContainer container, params FNode[] nodes)
         {
-            if (lineMesh != null) lineMesh.isVisible = false;
-            if (tipSprite != null) tipSprite.isVisible = false;
-            if (anchorSprite != null) anchorSprite.isVisible = false;
-            if (glowSprite != null) glowSprite.isVisible = false;
-            if (tensionIndicator != null) tensionIndicator.isVisible = false;
-            if (pullIndicator != null) pullIndicator.isVisible = false;
+            foreach (var node in nodes)
+                container.AddChild(node);
         }
 
         public void RemoveSprites()
         {
             if (!spritesInitiated) return;
 
-            try
+            FNode[] sprites = { lineMesh, tensionIndicator, pullIndicator };
+            foreach (var sprite in sprites)
             {
-                if (lineMesh != null) { lineMesh.RemoveFromContainer(); lineMesh = null; }
-                if (tipSprite != null) { tipSprite.RemoveFromContainer(); tipSprite = null; }
-                if (anchorSprite != null) { anchorSprite.RemoveFromContainer(); anchorSprite = null; }
-                if (glowSprite != null) { glowSprite.RemoveFromContainer(); glowSprite = null; }
-                if (tensionIndicator != null) { tensionIndicator.RemoveFromContainer(); tensionIndicator = null; }
-                if (pullIndicator != null) { pullIndicator.RemoveFromContainer(); pullIndicator = null; }
+                if (sprite != null)
+                    sprite.RemoveFromContainer();
             }
-            catch { }
-
             spritesInitiated = false;
-            wasVisible = false;
-            wasPulling = false;
+        }
+
+        private void HideAllSprites()
+        {
+            FNode[] sprites = { lineMesh, tensionIndicator, pullIndicator };
+            foreach (var sprite in sprites)
+                if (sprite != null)
+                    sprite.isVisible = false;
         }
     }
 }

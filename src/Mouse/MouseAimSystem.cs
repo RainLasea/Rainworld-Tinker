@@ -1,8 +1,9 @@
 ﻿using RWCustom;
 using System.Reflection;
 using UnityEngine;
+using Weaver.Silk.Bridge;
 
-namespace Weaver.Mouse
+namespace tinker.Mouse
 {
     public static class MouseAimSystem
     {
@@ -114,12 +115,22 @@ namespace Weaver.Mouse
 
             if (mouseAimEnabled && playerNumber == currentPlayerNumber && currentPlayer != null)
             {
-                bool inGame = Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
+                bool inGame = RWCustom.Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
 
-                if (inGame && Input.GetKey(KeyCode.Mouse1) && playerNumber == currentPlayerNumber)
+
+                bool isInBuildMode = false;
+                var bridgeState = SilkBridgeManager.GetBridgeModeState(currentPlayer);
+                if (bridgeState != null)
+                {
+                    isInBuildMode = bridgeState.active;
+                }
+
+
+                if (inGame && Input.GetKey(KeyCode.E) && playerNumber == currentPlayerNumber)
                     inputPackage.pckp = true;
 
-                if (inGame && Input.GetKey(KeyCode.Mouse0) && playerNumber == currentPlayerNumber)
+
+                if (inGame && Input.GetKey(KeyCode.Mouse0) && playerNumber == currentPlayerNumber && !isInBuildMode)
                     inputPackage.thrw = true;
             }
 

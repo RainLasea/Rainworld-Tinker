@@ -1,11 +1,16 @@
 {
-	"id": "weaver",
-	"name": "Weaver",
-	"description": "A recolored copy of The Survivor that demonstrates some custom SlugBase features.<LINE>This is a template mod for SlugBase.",
+	"id": "tinker",
+	"name": "The Tinker",
+	"description": "Though physically frail, it nimbly traverses the world with its unique abilities, <LINE> weaving a path to survival with wisdom in the gaps of the food chain.",
 	"features": {
-		"weaver/mouse_aiming": true,
-		"weaver/silk_enabled": true,
+		"tinker/mouse_aiming": true,
+		"tinker/silk_enabled": true,
 		"color": "2b2b2b",
+		"custom_colors": [
+    { "name": "Body", "story": "2b2b2b" },
+	{ "name": "Eyes", "story": "aae261" },
+    { "name": "AntennaBase", "story": "48be87" },
+    { "name": "AntennaTip", "story": "aae261" }],
 		
 		"select_menu_scene": "Slugcat_Prototype",
 		"select_menu_scene_ascended": "Ghost_Prototype"

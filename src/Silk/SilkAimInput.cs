@@ -1,16 +1,20 @@
-﻿using System.Collections.Generic;
+﻿using RWCustom;
+using System.Collections.Generic;
 using UnityEngine;
+using Weaver.Silk.Bridge;
 
-namespace Weaver.Silk
+namespace tinker.Silk
 {
     public static class SilkAimInput
     {
-        private const KeyCode TONGUE_KEY = KeyCode.F;
         private const KeyCode QUICK_RELEASE_KEY = KeyCode.Space;
+        private const float MIN_ROPE_VISIBLE = 0.1f;
+
         private static readonly HashSet<int> silkRequestPlayers = new();
-        private static readonly Dictionary<int, bool> keyDownLastFrame = new();
         private static readonly Dictionary<int, bool> spaceDownLastFrame = new();
         private static readonly Dictionary<int, bool> verticalInputLastFrame = new();
+        private static readonly Dictionary<int, bool> rightMouseDownLastFrame = new();
+        private static readonly Dictionary<int, bool> leftMouseDownLastFrame = new();
 
         public static bool IsShooting(Player player)
         {
@@ -26,14 +30,15 @@ namespace Weaver.Silk
         {
             On.Player.Update -= Player_Update_Input;
             silkRequestPlayers.Clear();
-            keyDownLastFrame.Clear();
             spaceDownLastFrame.Clear();
             verticalInputLastFrame.Clear();
+            rightMouseDownLastFrame.Clear();
+            leftMouseDownLastFrame.Clear();
         }
 
         private static Vector2 GetMouseAimDirection(Player player)
         {
-            var cam = Weaver.Mouse.MouseAimSystem.GetCurrentCamera();
+            var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
             Vector2 aimVector;
 
             if (cam != null)
@@ -41,6 +46,35 @@ namespace Weaver.Silk
                 Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
                 Vector2 headPos = player.bodyChunks[0].pos;
                 aimVector = mouseWorldPos - headPos;
+            }
+            else
+            {
+                if (player.bodyChunks[0].vel.magnitude > 0.5f)
+                    aimVector = player.bodyChunks[0].vel;
+                else if (player.input[0].x != 0 || player.input[0].y != 0)
+                    aimVector = new Vector2(player.input[0].x, player.input[0].y);
+                else
+                    aimVector = Vector2.right * player.flipDirection;
+            }
+
+            if (aimVector.magnitude < 0.1f)
+                aimVector = Vector2.right * player.flipDirection;
+
+            return aimVector.normalized;
+        }
+
+        private static Vector2 GetMouseAimDirectionFromPoint(Vector2 referencePoint, Player player)
+        {
+            var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
+            Vector2 aimVector;
+
+            if (cam != null)
+            {
+                Vector2 mouseWorldPos = new Vector2(
+                    Futile.mousePosition.x + cam.pos.x,
+                    Futile.mousePosition.y + cam.pos.y
+                );
+                aimVector = mouseWorldPos - referencePoint;
             }
             else
             {
@@ -72,30 +106,87 @@ namespace Weaver.Silk
         private static void Player_Update_Input(On.Player.orig_Update orig, Player self, bool eu)
         {
             orig(self, eu);
-            if (self.room == null) return;
+            if (self.room == null || self.dead) return;
             if (Plugin.SilkFeatureEnabled != null && Plugin.SilkFeatureEnabled.TryGet(self, out bool enabled) && !enabled) return;
 
             int playerNum = self.playerState?.playerNumber ?? -1;
             if (playerNum < 0) return;
 
-            SilkPhysics silk = WeaverSilkData.Get(self);
+            SilkPhysics silk = tinkerSilkData.Get(self);
+            var bridgeState = SilkBridgeManager.GetBridgeModeState(self);
 
-            bool keyDown = Input.GetKey(TONGUE_KEY);
-            bool wasKeyDown = keyDownLastFrame.ContainsKey(playerNum) && keyDownLastFrame[playerNum];
+            bool rightMouseDown = Input.GetMouseButton(1);
+            bool leftMouseDown = Input.GetMouseButton(0);
+            bool wasRightMouseDown = rightMouseDownLastFrame.GetValueOrDefault(playerNum);
+            bool wasLeftMouseDown = leftMouseDownLastFrame.GetValueOrDefault(playerNum);
+
+            rightMouseDownLastFrame[playerNum] = rightMouseDown;
+            leftMouseDownLastFrame[playerNum] = leftMouseDown;
+
+            bool rightMousePressed = rightMouseDown && !wasRightMouseDown;
+            bool leftMousePressed = leftMouseDown && !wasLeftMouseDown;
+
             bool spaceDown = Input.GetKey(QUICK_RELEASE_KEY);
-            bool wasSpaceDown = spaceDownLastFrame.ContainsKey(playerNum) && spaceDownLastFrame[playerNum];
-            bool wasVerticalInput = verticalInputLastFrame.ContainsKey(playerNum) && verticalInputLastFrame[playerNum];
-            bool currentVerticalInput = self.input[0].y != 0;
-
-            keyDownLastFrame[playerNum] = keyDown;
+            bool wasSpaceDown = spaceDownLastFrame.GetValueOrDefault(playerNum);
+            bool spacePressed = spaceDown && !wasSpaceDown;
             spaceDownLastFrame[playerNum] = spaceDown;
+
+            bool wasVerticalInput = verticalInputLastFrame.GetValueOrDefault(playerNum);
+            bool currentVerticalInput = self.input[0].y != 0;
             verticalInputLastFrame[playerNum] = currentVerticalInput;
 
-            bool keyPressed = keyDown && !wasKeyDown;
-            bool spacePressed = spaceDown && !wasSpaceDown;
+            bool inBridgeMode = bridgeState?.active == true;
+            bool animationRunning = bridgeState?.animating == true;
+
+            if (inBridgeMode && silk.Attached && bridgeState != null)
+            {
+                bridgeState.UpdateD2Position(self.room);
+            }
+
+            if (silk.Attached && rightMouseDown && bridgeState != null)
+            {
+                if (!bridgeState.active)
+                {
+                    bridgeState.Activate(silk.pos);
+
+                    if (silk.mode == SilkMode.AttachedToTerrain && silk.attachedBridge != null)
+                    {
+                        int segIndex;
+                        float t;
+                        silk.attachedBridge.GetClosestPoint(silk.pos, out segIndex, out t);
+                        bridgeState.AttachD2ToBridge(silk.attachedBridge, segIndex, t);
+                    }
+                    else if (silk.mode == SilkMode.AttachedToObject && silk.attachedObject != null)
+                    {
+                        bridgeState.AttachD2ToObject(silk.attachedObject);
+                    }
+                }
+
+                if (leftMousePressed && !bridgeState.animating)
+                {
+                    Vector2 D2 = bridgeState.point2;
+
+
+                    Vector2 shootDir = GetMouseAimDirectionFromPoint(D2, self);
+
+
+                    Vector2 mouseWorld = GetMouseWorldPosition();
+                    bridgeState.ShootVirtualSilk(shootDir, D2, self.room, mouseWorld);
+
+                    silk.Release();
+                }
+            }
+            else if (bridgeState?.active == true && !bridgeState.animating)
+            {
+                bridgeState.Deactivate();
+            }
 
             if (wasVerticalInput && !currentVerticalInput && silk.Attached)
+            {
                 silk.idealRopeLength = silk.requestedRopeLength;
+                if (silk.idealRopeLength < MIN_ROPE_VISIBLE)
+                    silk.idealRopeLength = MIN_ROPE_VISIBLE;
+            }
 
             if (spacePressed && silk.Attached)
             {
@@ -103,7 +194,7 @@ namespace Weaver.Silk
                 return;
             }
 
-            if (keyPressed)
+            if (rightMousePressed && !inBridgeMode && !animationRunning)
             {
                 if (silk.mode == SilkMode.Retracted)
                     silk.Shoot(GetMouseAimDirection(self));
@@ -111,7 +202,7 @@ namespace Weaver.Silk
                     silk.Release();
             }
 
-            if (silk.Attached)
+            if (silk.Attached && !animationRunning)
             {
                 bool attachedToTerrain = silk.mode == SilkMode.AttachedToTerrain;
 
@@ -120,12 +211,21 @@ namespace Weaver.Silk
                     if (self.input[0].y > 0)
                     {
                         MovePlayerVertically(self, silk, 1f);
-                        silk.idealRopeLength = Mathf.Max(silk.idealRopeLength - 4f, 50f);
+
+                        float currentDist = Vector2.Distance(self.bodyChunks[0].pos, silk.pos);
+                        const float REEL_STEP = 4f;
+                        float upperBound = Mathf.Max(currentDist, MIN_ROPE_VISIBLE);
+                        silk.idealRopeLength = Mathf.Clamp(silk.idealRopeLength - REEL_STEP, MIN_ROPE_VISIBLE, upperBound);
+
+                        if (silk.requestedRopeLength < MIN_ROPE_VISIBLE)
+                            silk.requestedRopeLength = MIN_ROPE_VISIBLE;
                     }
                     else if (self.input[0].y < 0)
                     {
                         MovePlayerVertically(self, silk, -1f);
-                        silk.idealRopeLength = Mathf.Min(silk.idealRopeLength + 4f, 800f);
+
+                        const float UNREEL_STEP = 4f;
+                        silk.idealRopeLength = Mathf.Clamp(silk.idealRopeLength + UNREEL_STEP, MIN_ROPE_VISIBLE, 800f);
                     }
                 }
 
@@ -133,7 +233,7 @@ namespace Weaver.Silk
                 {
                     Vector2 toAnchor = (silk.pos - self.bodyChunks[0].pos).normalized;
                     Vector2 perpendicular = PerpendicularVector(toAnchor);
-                    float swingForce = self.input[0].x * 1.2f;
+                    float swingForce = self.input[0].x * 0.5f;
 
                     for (int i = 0; i < self.bodyChunks.Length; i++)
                     {
@@ -143,6 +243,14 @@ namespace Weaver.Silk
                     }
                 }
             }
+        }
+
+        private static Vector2 GetMouseWorldPosition()
+        {
+            var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
+            if (cam != null)
+                return new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
+            return Vector2.zero;
         }
     }
 }
