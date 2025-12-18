@@ -1,10 +1,12 @@
 ﻿using BepInEx;
+using BepInEx.Logging;
 using SlugBase.DataTypes;
 using SlugBase.Features;
 using tinker.Mouse;
 using tinker.Silk;
-using Tinker.PlayerRender;
-using Weaver.Silk.Bridge;
+using Tinker;
+using Tinker.PlayerGraphics_Hooks;
+using Tinker.Silk.Bridge;
 using static SlugBase.Features.FeatureTypes;
 
 namespace tinker
@@ -13,10 +15,11 @@ namespace tinker
     public class Plugin : BaseUnityPlugin
     {
         public const string MOD_ID = "abysslasea.tinker";
-        public const string SlugName = "tinker";
+        public static SlugcatStats.Name SlugName = new SlugcatStats.Name("tinker", false);
         public static Plugin Instance;
-        public static BepInEx.Logging.ManualLogSource Logger;
+        public static new ManualLogSource Logger;
         public static PlayerFeature<bool> MouseAiming;
+
         public static PlayerFeature<bool> SilkFeatureEnabled;
         public static readonly PlayerFeature<PlayerColor> AntennaBaseColor = PlayerCustomColor("AntennaBase");
         public static readonly PlayerFeature<PlayerColor> AntennaTipColor = PlayerCustomColor("AntennaTip");
@@ -35,6 +38,9 @@ namespace tinker
             MouseRender.Initialize();
             SilkBridgeManager.Initialize();
             SilkBridgeGraphics.Initialize();
+
+            TinkerLanguageHint.Init();
+
             AntennaManager.Init();
 
             On.Player.Update += Player_Update;
@@ -47,6 +53,7 @@ namespace tinker
             tinkerSilkData.Cleanup();
             MouseAimSystem.Cleanup();
             MouseRender.Cleanup();
+
             AntennaManager.Cleanup();
 
             On.Player.Update -= Player_Update;

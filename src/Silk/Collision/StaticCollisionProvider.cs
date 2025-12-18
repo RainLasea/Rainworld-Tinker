@@ -1,8 +1,9 @@
 using UnityEngine;
 using RWCustom;
-using Weaver.Silk.Bridge;
+using Tinker.Silk.Bridge;
+using Tinker.Silk.Collision;
 
-namespace Weaver.Silk.Collision
+namespace Tinker.Silk.Collision
 {
     public sealed class StaticCollisionProvider : ICollisionProvider
     {

@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Weaver.Silk.Bridge
+namespace Tinker.Silk.Bridge
 {
     public static class SilkBridgeGraphics
     {

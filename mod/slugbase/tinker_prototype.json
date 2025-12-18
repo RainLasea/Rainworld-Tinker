@@ -12,7 +12,7 @@
     { "name": "AntennaBase", "story": "48be87" },
     { "name": "AntennaTip", "story": "aae261" }],
 		
-		"select_menu_scene": "Slugcat_Prototype",
-		"select_menu_scene_ascended": "Ghost_Prototype"
+		"select_menu_scene": "Tinker_Prototype_Scenes",
+		"select_menu_scene_ascended": "Tinker_Ghost_Prototype_Scenes"
 	}
 }

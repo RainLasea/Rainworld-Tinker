@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 using tinker.Silk;
 using UnityEngine;
 
-namespace Weaver.Silk.Bridge
+namespace Tinker.Silk.Bridge
 {
     public class BridgeModeState
     {

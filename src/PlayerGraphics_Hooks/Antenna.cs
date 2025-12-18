@@ -1,10 +1,10 @@
-using RWCustom;
+﻿using RWCustom;
 using System;
 using System.Collections.Generic;
 using tinker;
 using UnityEngine;
 
-namespace Tinker.PlayerRender
+namespace Tinker.PlayerGraphics_Hooks
 {
     public abstract class Antenna
     {
@@ -35,7 +35,7 @@ namespace Tinker.PlayerRender
         {
             this.player = player;
             this.graphics = graphics;
-            enabled = player.slugcatStats.name.ToString() == Plugin.SlugName;
+            enabled = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString();
             if (!enabled) return;
             leftAntenna = new MainAntenna(graphics, player, true, 0f);
             rightAntenna = new MainAntenna(graphics, player, false, 0f);
@@ -174,7 +174,7 @@ namespace Tinker.PlayerRender
         public static bool ShouldHaveAntenna(Player player)
         {
             return player != null &&
-                   player.slugcatStats.name.ToString() == Plugin.SlugName &&
+                   player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() &&
                    player.room != null &&
                    player.graphicsModule != null;
         }

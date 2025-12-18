@@ -1,8 +1,8 @@
 ﻿using RWCustom;
 using System.Collections.Generic;
+using Tinker.Silk.Collision;
 using UnityEngine;
-using Weaver.Silk.Bridge;
-using Weaver.Silk.Collision;
+using Tinker.Silk.Bridge;
 
 namespace tinker.Silk
 {
