@@ -1,8 +1,8 @@
 ﻿using RWCustom;
 using System;
-using System.Collections.Generic;
 using tinker;
 using UnityEngine;
+using SlugBase.DataTypes;
 
 namespace Tinker.PlayerGraphics_Hooks
 {
@@ -14,6 +14,7 @@ namespace Tinker.PlayerGraphics_Hooks
         public abstract void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos);
         public abstract void AddToContainer(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, FContainer container);
         public abstract void RemoveSprites();
+        public abstract void Reset();
 
         protected Vector2 Interpolate(Vector2 last, Vector2 current, float timeStacker)
         {
@@ -41,10 +42,7 @@ namespace Tinker.PlayerGraphics_Hooks
             rightAntenna = new MainAntenna(graphics, player, false, 0f);
             leftMiniAntenna = new MiniAntenna(graphics, player, true, 0f);
             rightMiniAntenna = new MiniAntenna(graphics, player, false, 0f);
-            leftAntenna.Update();
-            rightAntenna.Update();
-            leftMiniAntenna.Update();
-            rightMiniAntenna.Update();
+            Reset(); // Call Reset on creation to initialize positions
         }
 
         public void Update()
@@ -91,113 +89,14 @@ namespace Tinker.PlayerGraphics_Hooks
             leftMiniAntenna?.RemoveSprites();
             rightMiniAntenna?.RemoveSprites();
         }
-    }
 
-    public static class AntennaManager
-    {
-        internal static Dictionary<Player, AntennaSystem> activeSystems = new();
-        internal static Dictionary<Player, AntennaSystem> ActiveSystems => activeSystems;
-
-        public static void Init()
+        public void Reset()
         {
-            On.Player.Update += Player_Update;
-            On.PlayerGraphics.InitiateSprites += PlayerGraphics_InitiateSprites;
-            On.PlayerGraphics.DrawSprites += PlayerGraphics_DrawSprites;
-            On.PlayerGraphics.AddToContainer += PlayerGraphics_AddToContainer;
-            On.Player.NewRoom += Player_NewRoom;
-        }
-
-        private static void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
-        {
-            orig(self, eu);
-            if (ShouldHaveAntenna(self) && !activeSystems.ContainsKey(self))
-            {
-                activeSystems[self] = new AntennaSystem(self.graphicsModule as PlayerGraphics, self);
-            }
-            else if (!ShouldHaveAntenna(self) && activeSystems.ContainsKey(self))
-            {
-                activeSystems[self].RemoveSprites();
-                activeSystems.Remove(self);
-                return;
-            }
-
-            if (activeSystems.ContainsKey(self))
-            {
-                activeSystems[self]?.Update();
-            }
-        }
-
-        private static void PlayerGraphics_InitiateSprites(On.PlayerGraphics.orig_InitiateSprites orig, PlayerGraphics self, RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam)
-        {
-            orig(self, sLeaser, rCam);
-            if (self.owner is Player player && ShouldHaveAntenna(player))
-            {
-                InitSystemForPlayer(player);
-                activeSystems[player]?.InitiateSprites(sLeaser, rCam);
-            }
-        }
-
-        private static void PlayerGraphics_DrawSprites(On.PlayerGraphics.orig_DrawSprites orig, PlayerGraphics self, RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
-        {
-            orig(self, sLeaser, rCam, timeStacker, camPos);
-            if (self.owner is Player player && IsActive(player))
-            {
-                activeSystems[player]?.DrawSprites(sLeaser, rCam, timeStacker, camPos);
-            }
-        }
-
-        private static void PlayerGraphics_AddToContainer(On.PlayerGraphics.orig_AddToContainer orig, PlayerGraphics self, RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, FContainer container)
-        {
-            orig(self, sLeaser, rCam, container);
-            if (self.owner is Player player && IsActive(player))
-            {
-                activeSystems[player]?.AddToContainer(sLeaser, rCam, container);
-            }
-        }
-
-        private static void Player_NewRoom(On.Player.orig_NewRoom orig, Player self, Room newRoom)
-        {
-            if (activeSystems.ContainsKey(self) && (newRoom == null || !ShouldHaveAntenna(self)))
-            {
-                activeSystems[self].RemoveSprites();
-                activeSystems.Remove(self);
-            }
-
-            orig(self, newRoom);
-        }
-
-        public static bool IsActive(Player player)
-        {
-            return activeSystems.ContainsKey(player) && ShouldHaveAntenna(player);
-        }
-
-        public static bool ShouldHaveAntenna(Player player)
-        {
-            return player != null &&
-                   player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() &&
-                   player.room != null &&
-                   player.graphicsModule != null;
-        }
-
-        public static void InitSystemForPlayer(Player player)
-        {
-            if (!activeSystems.ContainsKey(player) && ShouldHaveAntenna(player))
-            {
-                activeSystems[player] = new AntennaSystem(player.graphicsModule as PlayerGraphics, player);
-            }
-        }
-
-        public static void Cleanup()
-        {
-            foreach (var system in activeSystems.Values)
-                system.RemoveSprites();
-            activeSystems.Clear();
-
-            On.Player.Update -= Player_Update;
-            On.PlayerGraphics.InitiateSprites -= PlayerGraphics_InitiateSprites;
-            On.PlayerGraphics.DrawSprites -= PlayerGraphics_DrawSprites;
-            On.PlayerGraphics.AddToContainer -= PlayerGraphics_AddToContainer;
-            On.Player.NewRoom -= Player_NewRoom;
+            if (!enabled) return;
+            leftAntenna?.Reset();
+            rightAntenna?.Reset();
+            leftMiniAntenna?.Reset();
+            rightMiniAntenna?.Reset();
         }
     }
 
@@ -215,6 +114,7 @@ namespace Tinker.PlayerGraphics_Hooks
             currentPoints = new Vector2[segments + 1];
             idealPoints = new Vector2[segments + 1];
             velocities = new Vector2[segments + 1];
+            lastPoints = new Vector2[segments + 1];
             for (int i = 0; i <= segments; i++)
             {
                 velocities[i] = Vector2.zero;
@@ -228,8 +128,8 @@ namespace Tinker.PlayerGraphics_Hooks
         protected float segmentLength = 9f;
         protected float baseWidth = 2.5f;
         protected float tipWidth = 0.5f;
-        protected float baseYOffset = 7f;
-        protected float lateralOffset = 0f;
+        protected float baseYOffset = 7.5f;
+        protected float lateralOffset = 2f;
 
         private PlayerGraphics graphics;
         private Player player;
@@ -245,6 +145,9 @@ namespace Tinker.PlayerGraphics_Hooks
         protected Vector2[] idealPoints;
         protected Vector2[] velocities;
         private RoomCamera currentCamera;
+
+        private float zOffset = 0f;
+        private Vector2 tipVel;
 
         public MainAntenna(PlayerGraphics graphics, Player player, bool isLeft, float angleOffset)
         {
@@ -268,22 +171,35 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public override void Update()
         {
-            if (player == null || player.room == null) return;
+            if (player == null || player.room == null || graphics == null) return;
+
             for (int i = 0; i <= segments; i++)
             {
                 lastPoints[i] = currentPoints[i];
             }
+
             CalculateIdealPoints();
-            if (!spritesInitiated)
-            {
-                for (int i = 0; i <= segments; i++)
-                {
-                    currentPoints[i] = idealPoints[i];
-                    velocities[i] = Vector2.zero;
-                    lastPoints[i] = idealPoints[i];
-                }
-            }
             UpdatePhysics();
+        }
+
+        public override void Reset()
+        {
+            if (player == null || player.room == null || graphics == null) return;
+            for (int i = 0; i <= segments; i++)
+            {
+                currentPoints[i] = player.mainBodyChunk.pos;
+                lastPoints[i] = player.mainBodyChunk.pos;
+                velocities[i] = Vector2.zero;
+            }
+            tipVel = Vector2.zero;
+
+            CalculateIdealPoints();
+
+            for (int i = 0; i <= segments; i++)
+            {
+                currentPoints[i] = idealPoints[i];
+                lastPoints[i] = idealPoints[i];
+            }
         }
 
         private static Vector2 Rotate(Vector2 v, float angle)
@@ -295,84 +211,113 @@ namespace Tinker.PlayerGraphics_Hooks
 
         private void CalculateIdealPoints()
         {
-            Vector2 headPos = graphics.drawPositions[0, 0];
-            Vector2 neckPos = graphics.drawPositions[1, 0];
-            Vector2 bodyPos = player.mainBodyChunk != null ? player.mainBodyChunk.pos : neckPos;
-            Vector2 hipsPos = (player.bodyChunks != null && player.bodyChunks.Length > 1) ? player.bodyChunks[1].pos : neckPos;
-            Vector2 dif = (bodyPos - hipsPos);
-            Vector2 difNorm = dif.sqrMagnitude > 1e-6f ? dif.normalized : Vector2.up;
-            float bodyRotation = 0f;
-            if (difNorm != Vector2.zero)
+            if (graphics?.head == null || player?.mainBodyChunk == null) return;
+            Vector2 headPos = graphics.head.pos;
+            Vector2 bodyDir = (player.mainBodyChunk.pos - player.bodyChunks[1].pos).normalized;
+            Vector2 bodyPerp = Custom.PerpendicularVector(bodyDir);
+
+            bool isCrawling = player.bodyMode == Player.BodyModeIndex.Crawl || player.bodyMode == Player.BodyModeIndex.CorridorClimb;
+            bool facingLeft = graphics.lookDirection.x < 0;
+
+            float side = isLeft ? -1f : 1f;
+
+            if (isCrawling)
             {
-                bodyRotation = Mathf.Atan2(difNorm.x, difNorm.y);
+                float bodyAngle = Custom.VecToDeg(bodyDir);
+                float flip = (bodyAngle > 0f && bodyAngle < 180f) ? 1f : -1f;
+                if (isLeft) flip *= -1f;
+
+                Vector2 targetDir = (bodyDir + bodyPerp * side * 0.4f * flip).normalized;
+                Vector2 tipTarget = headPos + targetDir * (segments * segmentLength);
+
+                tipVel *= 0.8f;
+                tipVel += (tipTarget - currentPoints[segments]) * 0.1f;
+                tipVel += Custom.RNV() * 0.2f;
+
+                Vector2 bezPt2 = headPos + bodyDir * 20f;
+                Vector2 tipPos = currentPoints[segments] + tipVel;
+
+                for (int i = 0; i <= segments; i++)
+                {
+                    float t = (float)i / segments;
+                    idealPoints[i] = Custom.Bezier(headPos, bezPt2, tipPos, tipPos, t);
+                }
+            }
+            else
+            {
+                Vector2 neckPos = graphics.drawPositions[1, 0];
+                float bodyRotation = Custom.VecToDeg(bodyDir);
+                float currentBaseYOffset = this.baseYOffset;
+                float currentLateralOffset = this.lateralOffset;
+
+                float baseXOffset = side * -1f * (facingLeft ? 3f : 1.5f);
+                baseXOffset += side * -1f * currentLateralOffset;
+
+                Vector2 headDir = (graphics.head.pos - graphics.drawPositions[0, 0]).normalized;
+                if (headDir.sqrMagnitude < 0.1f) headDir = (graphics.head.pos - neckPos).normalized;
+                if (headDir.sqrMagnitude < 0.1f) headDir = Vector2.up;
+
+
+                Vector2 headOffset = new Vector2(-3f * headDir.x, -2.5f * headDir.y);
+                Vector2 bodyOffset = -3f * bodyDir;
+
+                Vector2 rotatedBase = Rotate(new Vector2(baseXOffset, currentBaseYOffset), Mathf.Deg2Rad * -bodyRotation * (0.4f * (1f - Mathf.Abs(Mathf.Cos(Mathf.Deg2Rad * bodyRotation))) + 1f));
+                idealPoints[0] = headPos + headOffset + bodyOffset + rotatedBase;
+
+                Vector2 antennaUpDirection = (bodyDir + Vector2.up * 0.5f).normalized;
+
+                Vector2 lookDir = graphics.lookDirection;
+                float horizontalLook = (facingLeft ? -1 : 1) * 0.3f;
+                float verticalLook = lookDir.y * 0.5f;
+
+                Vector2 finalDir = (antennaUpDirection + new Vector2(horizontalLook, verticalLook)).normalized;
+                float baseAngle = Custom.VecToDeg(finalDir);
+
+                baseAngle += angleOffset;
+                baseAngle += (bodyRotation * 0.12f) * side * -1f;
+
+                for (int i = 1; i <= segments; i++)
+                {
+                    float angle = baseAngle;
+                    float outwardAngle = side * -1f * 40f;
+                    float inwardAngle = side * 50f;
+
+                    if (i == 1) angle += outwardAngle;
+                    else if (i == 2) angle += side * -1f * 5.7f;
+                    else if (i == 3) angle += inwardAngle;
+                    Vector2 dir = Custom.DegToVec(angle);
+                    idealPoints[i] = idealPoints[i - 1] + dir * segmentLength;
+                }
             }
 
-            bool facingLeft = headPos.x < neckPos.x;
-            float baseXOffset = (isLeft ? 1 : -1) * (facingLeft ? 3f : 1.5f);
-            baseXOffset += isLeft ? lateralOffset : -lateralOffset;
-
-            Vector2 headDir = (headPos - neckPos);
-            if (headDir.sqrMagnitude > 1e-6f) headDir.Normalize();
-            else headDir = Vector2.up;
-
-            Vector2 headOffset = new Vector2(-3f * headDir.x, -2.5f * headDir.y);
-            Vector2 bodyOffset = -3f * difNorm;
-            Vector2 rotatedBase = Rotate(new Vector2(baseXOffset, baseYOffset), -bodyRotation * (0.4f * (1f - Mathf.Abs(Mathf.Cos(bodyRotation))) + 1f));
-            Vector2 basePos = headPos + headOffset + bodyOffset + rotatedBase;
-            idealPoints[0] = basePos;
-
-            Vector2 headDirNorm = (headPos - neckPos);
-            if (headDirNorm.sqrMagnitude > 1e-6f) headDirNorm.Normalize();
-            else headDirNorm = Vector2.right;
-            float baseAngle = Mathf.Atan2(headDirNorm.y, headDirNorm.x) + angleOffset;
-            if (facingLeft)
-                baseAngle = Mathf.PI - baseAngle;
-            baseAngle += bodyRotation * 0.12f * (isLeft ? -1f : 1f);
-
-            for (int i = 1; i <= segments; i++)
+            if (isCrawling)
             {
-                float angle = baseAngle;
-                float outwardAngle = (isLeft ? -1 : 1) * Mathf.Deg2Rad * 40f;
-                float inwardAngle = (isLeft ? 1 : -1) * Mathf.Deg2Rad * 50f;
-                if (i == 1) angle += outwardAngle;
-                else if (i == 2) angle += isLeft ? 0.1f : -0.1f;
-                else if (i == 3) angle += inwardAngle;
-                Vector2 dir = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
-                idealPoints[i] = idealPoints[i - 1] + dir * segmentLength;
+                bool shouldBeBehind = (facingLeft && !isLeft) || (!facingLeft && isLeft);
+                zOffset = shouldBeBehind ? -1f : 1f;
+            }
+            else
+            {
+                zOffset = 1f;
             }
         }
 
         private void UpdatePhysics()
         {
-            currentPoints[0] = idealPoints[0];
-            Vector2 bodyVel = player?.mainBodyChunk?.vel ?? Vector2.zero;
+            for (int i = 0; i <= segments; i++)
+            {
+                currentPoints[i] = idealPoints[i];
+            }
+
             for (int i = 1; i <= segments; i++)
             {
-                currentPoints[i] += velocities[i];
-                velocities[i] *= 0.98f;
-                velocities[i] += Vector2.down * 0.2f;
-                float speedInfluence = 0.02f * (1f - (float)i / Mathf.Max(1f, segments));
-                velocities[i] += bodyVel * speedInfluence;
-                Vector2 dir = (idealPoints[i] - currentPoints[i]);
-                if (dir.sqrMagnitude > 1e-6f) dir.Normalize();
-                float dist = Vector2.Distance(currentPoints[i], idealPoints[i]);
-                if (dist > 2f)
-                {
-                    currentPoints[i] += 0.4f * dir * (dist - 2f);
-                    velocities[i] += 0.4f * dir * (dist - 2f);
-                }
-                if (velocities[i].sqrMagnitude < 0.0001f && (currentPoints[i] - idealPoints[i]).sqrMagnitude < 0.0001f)
-                {
-                    velocities[i] = Vector2.zero;
-                    currentPoints[i] = idealPoints[i];
-                }
                 Vector2 toNext = currentPoints[i] - currentPoints[i - 1];
-                float currentDist = toNext.magnitude;
-                if (currentDist > 0.01f)
+                float dist = toNext.magnitude;
+                float stretch = dist - segmentLength;
+                if (dist > 0.01f)
                 {
-                    float targetDist = segmentLength;
-                    Vector2 correctedPos = currentPoints[i - 1] + toNext.normalized * targetDist;
-                    currentPoints[i] = Vector2.Lerp(currentPoints[i], correctedPos, 0.5f);
+                    Vector2 dir = toNext / dist;
+                    currentPoints[i] -= dir * stretch * 0.5f;
+                    currentPoints[i - 1] += dir * stretch * 0.5f;
                 }
             }
         }
@@ -427,19 +372,12 @@ namespace Tinker.PlayerGraphics_Hooks
                 }
                 if (!exists)
                 {
-                    var newSprites = new FSprite[sLeaser.sprites.Length + 1];
-                    Array.Copy(sLeaser.sprites, newSprites, sLeaser.sprites.Length);
-                    newSprites[newSprites.Length - 1] = antennaMesh;
-                    sLeaser.sprites = newSprites;
+                    Array.Resize(ref sLeaser.sprites, sLeaser.sprites.Length + 1);
+                    sLeaser.sprites[sLeaser.sprites.Length - 1] = antennaMesh;
                 }
             }
-            CalculateIdealPoints();
-            for (int i = 0; i <= segments; i++)
-            {
-                currentPoints[i] = idealPoints[i];
-                lastPoints[i] = idealPoints[i];
-                velocities[i] = Vector2.zero;
-            }
+
+            Reset();
 
             spritesInitiated = true;
             addedToContainer = false;
@@ -449,17 +387,53 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public override void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
-            if (!spritesInitiated) return;
+            if (!spritesInitiated || antennaMesh == null || player.room == null) return;
+
             if (!addedToContainer && rCam != null)
+            {
                 TryAddToContainer(rCam);
-            UpdateAntennaMesh(camPos, timeStacker);
+                if (!addedToContainer) return;
+            }
+
+            FSprite headSprite = sLeaser.sprites[3];
+            if (zOffset < 0)
+            {
+                antennaMesh.MoveInFrontOfOtherNode(headSprite);
+                FContainer container = headSprite.container;
+                if (container != null && antennaMesh != null)
+                {
+                    container.RemoveChild(antennaMesh);
+                    int headIndex = container.GetChildIndex(headSprite);
+                    container.AddChildAtIndex(antennaMesh, Math.Max(0, headIndex));
+                }
+            }
+            else
+            {
+                antennaMesh.MoveInFrontOfOtherNode(headSprite);
+            }
+
+            UpdateAntennaMesh(sLeaser, camPos, timeStacker);
         }
 
-        private void UpdateAntennaMesh(Vector2 camPos, float timeStacker)
+        private void UpdateAntennaMesh(RoomCamera.SpriteLeaser sLeaser, Vector2 camPos, float timeStacker)
         {
             if (antennaMesh == null || antennaMesh.verticeColors == null) return;
-            Color color1 = new Color(0x48 / 255f, 0xbe / 255f, 0x87 / 255f, 0.95f);
-            Color color2 = new Color(0xaa / 255f, 0xe2 / 255f, 0x61 / 255f, 0.95f);
+
+            Color color1;
+            Color color2;
+
+            try
+            {
+                color1 = PlayerColor.GetCustomColor(graphics, "AntennaBase");
+                color2 = PlayerColor.GetCustomColor(graphics, "AntennaTip");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("TinkerMod: Failed to get custom colors for antenna! " + e.Message);
+                color1 = Color.magenta;
+                color2 = Color.yellow;
+            }
+
             float bodySpeed = player?.mainBodyChunk?.vel.magnitude ?? 0f;
             float widthWobble = Mathf.Clamp(bodySpeed * 0.2f, 0f, 1f);
             for (int i = 0; i < segments; i++)

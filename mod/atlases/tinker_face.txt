@@ -1,0 +1,28 @@
+{"frames": {
+
+"tinker_facea.png":
+{
+	"frame": {"x":0,"y":0,"w":32,"h":64},
+	"rotated": false,
+	"trimmed": false,
+	"spriteSourceSize": {"x":0,"y":0,"w":32,"h":64},
+	"sourceSize": {"w":32,"h":64}
+},
+"tinker_faceb.png":
+{
+	"frame": {"x":0,"y":64,"w":32,"h":64},
+	"rotated": false,
+	"trimmed": false,
+	"spriteSourceSize": {"x":0,"y":0,"w":32,"h":64},
+	"sourceSize": {"w":32,"h":64}
+}},
+"meta": {
+	"app": "https://www.codeandweb.com/texturepacker",
+	"version": "1.0",
+	"image": "tinker_face.png/tinker_face.png",
+	"format": "RGBA8888",
+	"size": {"w":32,"h":128},
+	"scale": "1",
+	"smartupdate": "$TexturePacker:SmartUpdate:1b1db5806938f139d4934ad49e6e2c30:30295f37864f7c36acf45a7e21d60be2:65b621eca601d5bfff98cae48ce12576$"
+}
+}

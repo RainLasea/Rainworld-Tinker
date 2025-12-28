@@ -83,6 +83,15 @@ namespace tinker.Mouse
             orig(self);
             if (cursorSprite != null && self.owner is Player player)
             {
+                bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
+                if (!isTinker)
+                {
+                    cursorSprite.isVisible = false;
+                    bridgeAnchorSprite.isVisible = false;
+                    targetPreviewSprite.isVisible = false;
+                    return;
+                }
+
                 if (MouseAimSystem.IsMouseAimEnabled())
                 {
                     UpdateCursorPosition(player);

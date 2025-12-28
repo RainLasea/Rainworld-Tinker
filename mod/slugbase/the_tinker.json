@@ -6,13 +6,25 @@
 		"tinker/mouse_aiming": true,
 		"tinker/silk_enabled": true,
 		"color": "2b2b2b",
+
+		"guide_overseer": 1,
+		
 		"custom_colors": [
     { "name": "Body", "story": "2b2b2b" },
 	{ "name": "Eyes", "story": "aae261" },
     { "name": "AntennaBase", "story": "48be87" },
     { "name": "AntennaTip", "story": "aae261" }],
 		
-		"select_menu_scene": "Tinker_Prototype_Scenes",
-		"select_menu_scene_ascended": "Tinker_Ghost_Prototype_Scenes"
+		"select_menu_scene": "slugcat_tinker",
+		"select_menu_scene_ascended": "ghost_tinker",
+
+		"start_room": "SU_CE",
+
+		"diet": {
+			"base": "Yellow",
+			"corpses": 0.25,
+			"meat": 0.5,
+			"plants": 1
+		}
 	}
 }

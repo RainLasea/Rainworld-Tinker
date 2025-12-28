@@ -576,7 +576,7 @@ namespace Tinker.Silk.Bridge
         public static void ClearAllBridges() => roomBridges.Clear();
 
 
-        public static SilkBridge GetClosestBridge(Room room, Vector2 pos, float range = 30f)
+        public static SilkBridge GetClosestBridge(Room room, Vector2 pos, float range = 30f, System.Func<object, bool> value = null)
         {
             if (!roomBridges.ContainsKey(room)) return null;
 
@@ -726,8 +726,16 @@ namespace Tinker.Silk.Bridge
 
             if (roomBridges.ContainsKey(self.room))
             {
-                foreach (var bridge in roomBridges[self.room])
+                var bridges = roomBridges[self.room];
+                for (int i = bridges.Count - 1; i >= 0; i--)
+                {
+                    var bridge = bridges[i];
                     bridge.Update();
+                    if (bridge.slatedForDeletetion)
+                    {
+                        bridges.RemoveAt(i);
+                    }
+                }
             }
 
             foreach (var player in self.room.game.Players)

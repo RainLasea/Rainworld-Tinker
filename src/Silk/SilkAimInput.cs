@@ -7,14 +7,13 @@ namespace tinker.Silk
 {
     public static class SilkAimInput
     {
-        private const KeyCode QUICK_RELEASE_KEY = KeyCode.Space;
         private const float MIN_ROPE_VISIBLE = 0.1f;
 
         private static readonly HashSet<int> silkRequestPlayers = new();
-        private static readonly Dictionary<int, bool> spaceDownLastFrame = new();
         private static readonly Dictionary<int, bool> verticalInputLastFrame = new();
         private static readonly Dictionary<int, bool> rightMouseDownLastFrame = new();
         private static readonly Dictionary<int, bool> leftMouseDownLastFrame = new();
+        private static readonly Dictionary<int, Room> lastPlayerRoom = new();
 
         public static bool IsShooting(Player player)
         {
@@ -24,16 +23,34 @@ namespace tinker.Silk
 
         public static bool IsReleasing(Player player) => false;
 
-        public static void Initialize() => On.Player.Update += Player_Update_Input;
+        public static void Initialize()
+        {
+            On.Player.Update += Player_Update_Input;
+            On.PlayerGraphics.SuckedIntoShortCut += PlayerGraphics_SuckedIntoShortCut;
+        }
 
         public static void Cleanup()
         {
             On.Player.Update -= Player_Update_Input;
+            On.PlayerGraphics.SuckedIntoShortCut -= PlayerGraphics_SuckedIntoShortCut;
             silkRequestPlayers.Clear();
-            spaceDownLastFrame.Clear();
             verticalInputLastFrame.Clear();
             rightMouseDownLastFrame.Clear();
             leftMouseDownLastFrame.Clear();
+            lastPlayerRoom.Clear();
+        }
+
+        private static void PlayerGraphics_SuckedIntoShortCut(On.PlayerGraphics.orig_SuckedIntoShortCut orig, PlayerGraphics self, Vector2 shortCutPosition)
+        {
+            orig(self, shortCutPosition);
+            if (self.owner is Player player)
+            {
+                SilkPhysics silk = tinkerSilkData.Get(player);
+                if (silk.Attached)
+                {
+                    silk.Release(true);
+                }
+            }
         }
 
         private static Vector2 GetMouseAimDirection(Player player)
@@ -107,12 +124,27 @@ namespace tinker.Silk
         {
             orig(self, eu);
             if (self.room == null || self.dead) return;
-            if (Plugin.SilkFeatureEnabled != null && Plugin.SilkFeatureEnabled.TryGet(self, out bool enabled) && !enabled) return;
+
+            bool isTinker = self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
+            if (!isTinker) return;
+
+            if (Plugin.SilkFeatureEnabled != null && Plugin.SilkFeatureEnabled.TryGet(self, out bool featureEnabled) && !featureEnabled) return;
 
             int playerNum = self.playerState?.playerNumber ?? -1;
             if (playerNum < 0) return;
 
             SilkPhysics silk = tinkerSilkData.Get(self);
+
+            lastPlayerRoom.TryGetValue(playerNum, out Room lastRoom);
+            if (lastRoom != self.room)
+            {
+                if (silk.Attached)
+                {
+                    silk.Release(true);
+                }
+                lastPlayerRoom[playerNum] = self.room;
+            }
+
             var bridgeState = SilkBridgeManager.GetBridgeModeState(self);
 
             bool rightMouseDown = Input.GetMouseButton(1);
@@ -125,11 +157,6 @@ namespace tinker.Silk
 
             bool rightMousePressed = rightMouseDown && !wasRightMouseDown;
             bool leftMousePressed = leftMouseDown && !wasLeftMouseDown;
-
-            bool spaceDown = Input.GetKey(QUICK_RELEASE_KEY);
-            bool wasSpaceDown = spaceDownLastFrame.GetValueOrDefault(playerNum);
-            bool spacePressed = spaceDown && !wasSpaceDown;
-            spaceDownLastFrame[playerNum] = spaceDown;
 
             bool wasVerticalInput = verticalInputLastFrame.GetValueOrDefault(playerNum);
             bool currentVerticalInput = self.input[0].y != 0;
@@ -188,7 +215,12 @@ namespace tinker.Silk
                     silk.idealRopeLength = MIN_ROPE_VISIBLE;
             }
 
-            if (spacePressed && silk.Attached)
+            Options.ControlSetup controlSetup = RWCustom.Custom.rainWorld.options.controls[self.playerState.playerNumber];
+            KeyCode jumpKey = controlSetup.KeyboardJump;
+
+            bool jumpPressed = Input.GetKeyDown(jumpKey) || self.input[0].jmp;
+
+            if (jumpPressed && silk.Attached)
             {
                 silk.Release();
                 return;
@@ -240,6 +272,26 @@ namespace tinker.Silk
                         self.bodyChunks[i].vel += perpendicular * swingForce;
                         if (Mathf.Abs(toAnchor.x) > 0.3f)
                             self.bodyChunks[i].vel.y -= 0.3f;
+                    }
+                }
+            }
+            if (!inBridgeMode && !SilkClimb.IsClimbing(self) && self.Consious && self.bodyMode != Player.BodyModeIndex.CorridorClimb)
+            {
+                if (self.input[0].y > 0)
+                {
+                    Vector2 checkPos = self.mainBodyChunk.pos + new Vector2(0f, 15f);
+                    SilkBridge closestBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, 40f);
+
+                    if (closestBridge != null)
+                    {
+                        int segIndex;
+                        float t;
+                        Vector2 closestPoint = closestBridge.GetClosestPoint(checkPos, out segIndex, out t);
+
+                        SilkClimb.AttachPlayerToSilk(self, closestBridge, segIndex, t);
+                        self.Blink(5);
+                        self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 1f, 1f);
+                        return;
                     }
                 }
             }

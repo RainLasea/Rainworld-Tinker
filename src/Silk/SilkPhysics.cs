@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Tinker.Silk.Collision;
 using UnityEngine;
 using Tinker.Silk.Bridge;
+using System;
 
 namespace tinker.Silk
 {
@@ -31,12 +32,25 @@ namespace tinker.Silk
         public bool returning;
         private IntVector2[] _cachedRtList = new IntVector2[20];
         public bool pullingObject;
+        public bool instantDisappear;
 
         public SilkBridge attachedBridge = null;
         private int attachedBridgeSeg = -1;
         private float attachedBridgeT = 0f;
 
         private List<Vector2> ropeSegmentPoints = new List<Vector2>();
+
+        private struct Corner
+        {
+            public Vector2 pos;
+            public IntVector2 dir;
+
+            public Corner(Vector2 pos, IntVector2 dir)
+            {
+                this.pos = pos;
+                this.dir = dir;
+            }
+        }
 
         private class SegmentBridgeInfo
         {
@@ -62,11 +76,13 @@ namespace tinker.Silk
         private const int MAX_CHANGES_PER_UPDATE = 2;
 
 
-        private const float WALL_CLEARANCE = 3f;
+        private const float WALL_CLEARANCE = 1f;
         private const float CORNER_DUAL_SIDE_EPS = 0.9f;
         private const float PARALLEL_DOT_THRESHOLD = 0.35f;
         private const float SLIDE_CLEAR_FORCE = 4f;
         private const float MAX_NODE_WALL_PENETRATION = 5f;
+
+        private const float ROPE_THICKNESS = 1f;
 
         private readonly ICollisionProvider collisionProvider;
 
@@ -84,6 +100,7 @@ namespace tinker.Silk
             attachedBridge = null;
             attachedBridgeSeg = -1;
             attachedBridgeT = 0f;
+            instantDisappear = false;
 
             this.collisionProvider = collisionProvider ?? StaticCollisionProvider.Instance;
         }
@@ -100,9 +117,14 @@ namespace tinker.Silk
             return path;
         }
 
-        public void Release()
+        public void Release(bool instant = false)
         {
             if (mode == SilkMode.Retracted) return;
+
+            if (instant)
+            {
+                instantDisappear = true;
+            }
 
             mode = SilkMode.Retracted;
             attachedChunk = null;
@@ -141,6 +163,11 @@ namespace tinker.Silk
 
         public void Update()
         {
+            if (player.room == null && Attached)
+            {
+                Release(true);
+            }
+
             lastPos = pos;
             frameCounter++;
 
@@ -491,11 +518,11 @@ namespace tinker.Silk
             while (segmentLastChanged.Count < ropeSegmentPoints.Count) segmentLastChanged.Add(0);
             while (segmentLastChanged.Count > ropeSegmentPoints.Count) segmentLastChanged.RemoveAt(segmentLastChanged.Count - 1);
 
-            SlideNodesOffObstacles();
             RemoveUnnecessarySegments();
             AddNecessarySegments();
+            SlideNodesOffObstacles();
 
-            while (segmentLastChanged.Count < ropeSegmentPoints.Count) segmentLastChanged.Add(0);
+            while (segmentLastChanged.Count < ropeSegmentPoints.Count) segmentLastChanged.Add(frameCounter);
             while (segmentLastChanged.Count > ropeSegmentPoints.Count) segmentLastChanged.RemoveAt(segmentLastChanged.Count - 1);
             while (segmentBridgeAttachments.Count < ropeSegmentPoints.Count) segmentBridgeAttachments.Add(null);
             while (segmentBridgeAttachments.Count > ropeSegmentPoints.Count) segmentBridgeAttachments.RemoveAt(segmentBridgeAttachments.Count - 1);
@@ -557,60 +584,63 @@ namespace tinker.Silk
 
         private void RemoveUnnecessarySegments()
         {
-            for (int i = ropeSegmentPoints.Count - 1; i >= 0; i--)
+            if (ropeSegmentPoints.Count == 0) return;
+
+            List<int> indicesToRemove = new List<int>();
+            int changes = 0;
+
+            for (int i = 0; i < ropeSegmentPoints.Count && changes < MAX_CHANGES_PER_UPDATE; i++)
             {
                 if (frameCounter - segmentLastChanged[i] < COOLDOWN_FRAMES) continue;
 
-                Vector2 start = (i == 0) ? baseChunk.pos : ropeSegmentPoints[i - 1];
-                Vector2 end = (i == ropeSegmentPoints.Count - 1) ? pos : ropeSegmentPoints[i + 1];
+                if (segmentBridgeAttachments[i] != null) continue;
+
+                Vector2 prev = (i == 0) ? baseChunk.pos : ropeSegmentPoints[i - 1];
                 Vector2 point = ropeSegmentPoints[i];
+                Vector2 next = (i == ropeSegmentPoints.Count - 1) ? pos : ropeSegmentPoints[i + 1];
 
-                IntVector2? hitTile = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, start, end);
-                bool bridgeHit = collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, start, end, out SilkBridge bridge, out Vector2 bridgePoint, out float t);
+                bool directPathIsClear = !collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, prev, next).HasValue &&
+                                         !collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, prev, next, out _, out _, out _);
 
-                if (!hitTile.HasValue && !bridgeHit)
+                if (directPathIsClear)
                 {
-                    bool necessaryCorner = IsNecessaryCornerPoint(point, start, end);
+                    indicesToRemove.Add(i);
+                    changes++;
+                    continue;
+                }
 
-                    if (!necessaryCorner)
+                IntVector2 tilePos = player.room.GetTilePosition(point);
+                List<Corner> corners = GetCornersForTile(tilePos.x, tilePos.y);
+                corners.AddRange(GetCornersForTile(tilePos.x - 1, tilePos.y));
+                corners.AddRange(GetCornersForTile(tilePos.x + 1, tilePos.y));
+                corners.AddRange(GetCornersForTile(tilePos.x, tilePos.y - 1));
+                corners.AddRange(GetCornersForTile(tilePos.x, tilePos.y + 1));
+
+                bool isNecessary = false;
+                foreach (var corner in corners)
+                {
+                    if (Vector2.Distance(point, corner.pos) < 2f && DoesLineOverlapCorner(prev, next, corner))
                     {
-                        float distToLine = DistancePointToLine(point, start, end);
-                        Vector2 dirA = (point - start);
-                        Vector2 dirB = (end - point);
-
-                        if (dirA.sqrMagnitude > 0.0001f && dirB.sqrMagnitude > 0.0001f)
-                        {
-                            float cos = Vector2.Dot(dirA.normalized, dirB.normalized);
-
-                            if (distToLine <= REMOVE_MAX_DISTANCE_TO_LINE && cos >= ANGLE_REMOVE_COS)
-                            {
-                                ropeSegmentPoints.RemoveAt(i);
-                                segmentLastChanged.RemoveAt(i);
-                                segmentBridgeAttachments.RemoveAt(i);
-                            }
-                        }
-                        else
-                        {
-                            ropeSegmentPoints.RemoveAt(i);
-                            segmentLastChanged.RemoveAt(i);
-                            segmentBridgeAttachments.RemoveAt(i);
-                        }
+                        isNecessary = true;
+                        break;
                     }
                 }
-                else
-                {
 
-                    if (hitTile.HasValue)
-                    {
-                        FloatRect rect = player.room.TileRect(hitTile.Value);
-                        Vector2? testHit = GetRayRectIntersection(start, end, rect);
-                        if (!testHit.HasValue)
-                        {
-                            ropeSegmentPoints.RemoveAt(i);
-                            segmentLastChanged.RemoveAt(i);
-                            segmentBridgeAttachments.RemoveAt(i);
-                        }
-                    }
+                if (!isNecessary)
+                {
+                    indicesToRemove.Add(i);
+                    changes++;
+                }
+            }
+
+            if (indicesToRemove.Count > 0)
+            {
+                for (int i = indicesToRemove.Count - 1; i >= 0; i--)
+                {
+                    int index = indicesToRemove[i];
+                    ropeSegmentPoints.RemoveAt(index);
+                    segmentLastChanged.RemoveAt(index);
+                    segmentBridgeAttachments.RemoveAt(index);
                 }
             }
         }
@@ -638,70 +668,39 @@ namespace tinker.Silk
 
         private void AddNecessarySegments()
         {
-            Vector2 currentStart = baseChunk.pos;
-            int iterations = 0;
-            int MAX_ITERATIONS = 100;
-
-            for (int i = 0; i <= ropeSegmentPoints.Count && iterations < MAX_ITERATIONS; i++, iterations++)
+            int changes = 0;
+            for (int i = 0; i < TotalRopeSegments() - 1 && changes < MAX_CHANGES_PER_UPDATE; i++)
             {
-                Vector2 next = (i < ropeSegmentPoints.Count) ? ropeSegmentPoints[i] : pos;
-                float dist = Vector2.Distance(currentStart, next);
+                Vector2 currentStart = GetRopePoint(i);
+                Vector2 next = GetRopePoint(i + 1);
 
-                if (dist >= ADD_MIN_DISTANCE)
+                if (collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, currentStart, next, out SilkBridge bridge, out Vector2 bridgePoint, out float t))
                 {
-                    bool bridgeHit = collisionProvider.RayTraceBridgesReturnFirstIntersection(
-                        player.room, currentStart, next,
-                        out SilkBridge bridge, out Vector2 bridgePoint, out float t);
+                    Vector2 stable = bridge.GetClosestPoint(bridgePoint, out int segIndex, out float tval);
 
-                    if (bridgeHit)
-                    {
-                        int segIndex;
-                        float tval;
-                        Vector2 stable = bridge.GetClosestPoint(bridgePoint, out segIndex, out tval);
-
-                        ropeSegmentPoints.Insert(i, stable);
-                        segmentLastChanged.Insert(i, frameCounter);
-                        segmentBridgeAttachments.Insert(i, new SegmentBridgeInfo
-                        {
-                            bridge = bridge,
-                            segIndex = segIndex,
-                            t = tval
-                        });
-
-                        currentStart = stable;
-                        continue;
-                    }
-
-
-                    if (TryTerrainHit(currentStart, next, out Vector2 hitP, out Vector2 normal, out bool isCorner))
-                    {
-                        Vector2 dir = (next - currentStart).normalized;
-                        float parallelDot = Mathf.Abs(Vector2.Dot(dir, normal));
-
-
-                        if (isCorner && parallelDot < PARALLEL_DOT_THRESHOLD)
-                        {
-
-                            IntVector2? recheck = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, currentStart, next);
-                            if (!recheck.HasValue)
-                            {
-
-
-                                continue;
-                            }
-                        }
-
-                        ropeSegmentPoints.Insert(i, hitP);
-                        segmentLastChanged.Insert(i, frameCounter);
-                        segmentBridgeAttachments.Insert(i, null);
-                        currentStart = hitP;
-                        continue;
-                    }
+                    ropeSegmentPoints.Insert(i, stable);
+                    segmentLastChanged.Insert(i, frameCounter);
+                    segmentBridgeAttachments.Insert(i, new SegmentBridgeInfo { bridge = bridge, segIndex = segIndex, t = tval });
+                    changes++;
+                    i--;
+                    continue;
                 }
 
-                if (i < ropeSegmentPoints.Count)
+                if (TryTerrainHit(currentStart, next, out Vector2 hitPoint, out Vector2 wallNormal, out bool isCorner))
                 {
-                    currentStart = ropeSegmentPoints[i];
+                    Vector2 insertionPoint = hitPoint + wallNormal * 0.1f;
+
+                    if ((i > 0 && Vector2.Distance(insertionPoint, ropeSegmentPoints[i - 1]) < 1f) ||
+                        (Vector2.Distance(insertionPoint, currentStart) < 1f))
+                    {
+                        continue;
+                    }
+
+                    ropeSegmentPoints.Insert(i, insertionPoint);
+                    segmentLastChanged.Insert(i, frameCounter);
+                    segmentBridgeAttachments.Insert(i, null);
+                    changes++;
+                    i--;
                 }
             }
         }
@@ -1010,6 +1009,139 @@ namespace tinker.Silk
             Vector2 projection = lineStart + t * line;
 
             return Vector2.Distance(point, projection);
+        }
+
+        #region Rope Collision Logic
+
+        private bool DoesLineOverlapCorner(Vector2 l1, Vector2 l2, Corner corner)
+        {
+            IntVector2 cornerDir = corner.dir;
+            bool horizontalCheck = (l1.y == l2.y) ||
+                                   ((cornerDir.x > 0 && Custom.HorizontalCrossPoint(l1, l2, corner.pos.y).x <= corner.pos.x) ||
+                                    (cornerDir.x < 0 && Custom.HorizontalCrossPoint(l1, l2, corner.pos.y).x >= corner.pos.x));
+
+            bool verticalCheck = (l1.x == l2.x) ||
+                                 ((cornerDir.y > 0 && Custom.VerticalCrossPoint(l1, l2, corner.pos.x).y <= corner.pos.y) ||
+                                  (cornerDir.y < 0 && Custom.VerticalCrossPoint(l1, l2, corner.pos.x).y >= corner.pos.y));
+
+            return horizontalCheck && verticalCheck;
+        }
+
+        private List<Corner> GetCornersForTile(int i, int j)
+        {
+            List<Corner> corners = new List<Corner>();
+            if (!player.room.GetTile(i, j).Solid) return corners;
+
+            Vector2 tileCenter = player.room.MiddleOfTile(i, j);
+
+            if (!player.room.GetTile(i - 1, j).Solid && !player.room.GetTile(i, j - 1).Solid && !player.room.GetTile(i - 1, j - 1).Solid)
+            {
+                corners.Add(new Corner(tileCenter + new Vector2(-10f - ROPE_THICKNESS, -10f - ROPE_THICKNESS), new IntVector2(-1, -1)));
+            }
+            if (!player.room.GetTile(i + 1, j).Solid && !player.room.GetTile(i, j - 1).Solid && !player.room.GetTile(i + 1, j - 1).Solid)
+            {
+                corners.Add(new Corner(tileCenter + new Vector2(10f + ROPE_THICKNESS, -10f - ROPE_THICKNESS), new IntVector2(1, -1)));
+            }
+            if (!player.room.GetTile(i - 1, j).Solid && !player.room.GetTile(i, j + 1).Solid && !player.room.GetTile(i - 1, j + 1).Solid)
+            {
+                corners.Add(new Corner(tileCenter + new Vector2(-10f - ROPE_THICKNESS, 10f + ROPE_THICKNESS), new IntVector2(-1, 1)));
+            }
+            if (!player.room.GetTile(i + 1, j).Solid && !player.room.GetTile(i, j + 1).Solid && !player.room.GetTile(i + 1, j + 1).Solid)
+            {
+                corners.Add(new Corner(tileCenter + new Vector2(10f + ROPE_THICKNESS, 10f + ROPE_THICKNESS), new IntVector2(1, 1)));
+            }
+
+            return corners;
+        }
+
+        #endregion
+
+        private int TotalRopeSegments()
+        {
+            return ropeSegmentPoints.Count + 2;
+        }
+
+        private Vector2 GetRopePoint(int index)
+        {
+            if (index == 0) return baseChunk.pos;
+            if (index > ropeSegmentPoints.Count) return pos;
+            return ropeSegmentPoints[index - 1];
+        }
+    }
+
+    public static class SilkPhysicsUtil
+    {
+
+        public static bool TryFindLandingPoint(
+            Room room,
+            Vector2 from,
+            Vector2 to,
+            out Vector2 landingPoint,
+            out SilkBridge bridge,
+            out PhysicalObject obj)
+        {
+            landingPoint = to;
+            bridge = null;
+            obj = null;
+
+            IntVector2? terrainBlock = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, to);
+            if (terrainBlock.HasValue)
+            {
+                FloatRect tileRect = room.TileRect(terrainBlock.Value);
+                landingPoint = GetPreciseTerrainCollisionForPreview(room, from, to) ?? to;
+                return true;
+            }
+
+            var bridges = SilkBridgeManager.GetBridgesInRoom(room);
+            foreach (var b in bridges)
+            {
+                if (b == null || b.room != room) continue;
+                var path = b.GetRenderPath();
+                for (int i = 0; i < path.Count - 1; i++)
+                {
+                    if (SilkBridgeManager.SegmentIntersection(from, to, path[i], path[i + 1], out Vector2 hit, out float _))
+                    {
+                        landingPoint = hit;
+                        bridge = b;
+                        return true;
+                    }
+                }
+            }
+
+            foreach (var objList in room.physicalObjects)
+            {
+                foreach (var item in objList)
+                {
+                    if (item is Player) continue;
+                    foreach (var chunk in item.bodyChunks)
+                    {
+                        if (Custom.DistLess(to, chunk.pos, chunk.rad + 5f))
+                        {
+                            landingPoint = chunk.pos;
+                            obj = item;
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            landingPoint = to;
+            return true;
+        }
+
+        private static Vector2? GetPreciseTerrainCollisionForPreview(Room room, Vector2 from, Vector2 to)
+        {
+            IntVector2? firstSolid = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, to);
+            if (!firstSolid.HasValue) return null;
+            Vector2 start = from, end = to;
+            for (int i = 0; i < 10; i++)
+            {
+                Vector2 mid = (start + end) * 0.5f;
+                IntVector2? hit = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, mid);
+                if (hit.HasValue) end = mid;
+                else start = mid;
+            }
+            return end;
         }
     }
 }

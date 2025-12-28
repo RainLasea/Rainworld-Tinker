@@ -1,10 +1,10 @@
 ﻿{
 	"id": "abysslasea.tinker",
 	"name": "The Tinker",
-	"version": "0.0.1",
+	"version": "0.4.6",
 	"authors": "AbyssLasea",
-	"description": "A template for making SlugBase mods.",
-	"requirements": [ "slime-cubed.slugbase" ],
-	"requirements_names": [ "SlugBase" ],
+	"description": "A lost follower...",
+	"requirements": [ "slime-cubed.slugbase","moreslugcats" ],
+	"requirements_names": [ "SlugBase", "More Slugcat Expansion" ],
 	"tags": [ "Custom Slugcat" ]
 }

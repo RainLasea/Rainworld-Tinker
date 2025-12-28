@@ -72,40 +72,24 @@ namespace tinker.Mouse
 
         private static void Weapon_Thrown(On.Weapon.orig_Thrown orig, Weapon weapon, Creature thrownBy, Vector2 thrownPos, Vector2? firstFrameTraceFromPos, IntVector2 throwDir, float frc, bool eu)
         {
-            if (mouseAimEnabled && thrownBy is Player && thrownBy == currentPlayer)
+            orig(weapon, thrownBy, thrownPos, firstFrameTraceFromPos, throwDir, frc, eu);
+
+            if (mouseAimEnabled && thrownBy is Player player && player == currentPlayer)
             {
-                weapon.thrownBy = thrownBy;
-                weapon.thrownPos = thrownPos;
-                weapon.firstFrameTraceFromPos = firstFrameTraceFromPos;
-                weapon.changeDirCounter = 3;
-                weapon.ChangeOverlap(true);
-                weapon.firstChunk.MoveFromOutsideMyUpdate(eu, thrownPos);
-
-                Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + currentCamera.pos.x, Futile.mousePosition.y + currentCamera.pos.y);
-                Vector2 aimVector = Vector2.ClampMagnitude(mouseWorldPos - thrownPos, 0.03f) * 10f;
-
-                Vector2 normalizedAim = aimVector.normalized;
-                IntVector2 computedThrowDir = Mathf.Abs(normalizedAim.x) > Mathf.Abs(normalizedAim.y)
-                    ? new IntVector2(normalizedAim.x > 0 ? 1 : -1, 0)
-                    : new IntVector2(0, normalizedAim.y > 0 ? 1 : -1);
-
-                weaponThrowDirField.SetValue(weapon, computedThrowDir);
-
-                foreach (BodyChunk bodyChunk in weapon.bodyChunks)
+                bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
+                if (isTinker)
                 {
-                    bodyChunk.pos = thrownBy.mainBodyChunk.pos + aimVector;
-                    bodyChunk.vel = aimVector * 160f;
-                }
+                    Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + currentCamera.pos.x, Futile.mousePosition.y + currentCamera.pos.y);
+                    Vector2 aimVector = (mouseWorldPos - thrownPos).normalized;
 
-                weapon.setRotation = aimVector;
-                weapon.overrideExitThrownSpeed = frc >= 1f ? 0f : Mathf.Min(weapon.exitThrownModeSpeed, frc * 20f);
-                weapon.ChangeMode(Weapon.Mode.Thrown);
-                weapon.rotationSpeed = 0f;
-                weapon.meleeHitChunk = null;
-            }
-            else
-            {
-                orig(weapon, thrownBy, thrownPos, firstFrameTraceFromPos, throwDir, frc, eu);
+                    float originalSpeed = weapon.firstChunk.vel.magnitude;
+
+                    foreach (BodyChunk bodyChunk in weapon.bodyChunks)
+                    {
+                        bodyChunk.vel = aimVector * originalSpeed;
+                    }
+                    weapon.setRotation = aimVector;
+                }
             }
         }
 
@@ -115,8 +99,10 @@ namespace tinker.Mouse
 
             if (mouseAimEnabled && playerNumber == currentPlayerNumber && currentPlayer != null)
             {
-                bool inGame = RWCustom.Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
+                bool isTinker = currentPlayer.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !currentPlayer.isSlugpup;
+                if (!isTinker) return inputPackage;
 
+                bool inGame = RWCustom.Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
 
                 bool isInBuildMode = false;
                 var bridgeState = SilkBridgeManager.GetBridgeModeState(currentPlayer);
@@ -125,13 +111,13 @@ namespace tinker.Mouse
                     isInBuildMode = bridgeState.active;
                 }
 
-
                 if (inGame && Input.GetKey(KeyCode.E) && playerNumber == currentPlayerNumber)
                     inputPackage.pckp = true;
 
-
-                if (inGame && Input.GetKey(KeyCode.Mouse0) && playerNumber == currentPlayerNumber && !isInBuildMode)
+                if (inGame && Input.GetMouseButton(0) && playerNumber == currentPlayerNumber && !isInBuildMode)
+                {
                     inputPackage.thrw = true;
+                }
             }
 
             return inputPackage;

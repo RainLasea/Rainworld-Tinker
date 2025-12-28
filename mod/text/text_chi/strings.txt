@@ -1,4 +1,7 @@
 THE TINKER|巧匠
+abysslasea.tinker-name|巧匠
+abysslasea.tinker-description|一位迷茫的追寻者...
+
 AntennaBase|触角根部
 AntennaTip|触角尖端
 Though physically frail, it nimbly traverses the world with its unique abilities, <LINE> weaving a path to survival with wisdom in the gaps of the food chain.|身躯虽然羸弱，却凭借独特的能力灵巧穿梭，<LINE> 以智慧在食物链的夹缝中编织生路。

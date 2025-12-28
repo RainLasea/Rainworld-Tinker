@@ -1,5 +1,6 @@
 ﻿using RWCustom;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 namespace Tinker.Silk.Bridge
@@ -53,6 +54,15 @@ namespace Tinker.Silk.Bridge
         {
             orig(self, timeStacker, timeSpeed);
             if (self.room == null) return;
+
+            // 隐藏不属于当前房间的渲染器
+            foreach (var pair in roomRenderers.Where(pair => pair.Key != self.room))
+            {
+                foreach (var renderer in pair.Value)
+                {
+                    renderer.SetVisible(false);
+                }
+            }
 
             List<SilkBridge> bridges = SilkBridgeManager.GetBridgesInRoom(self.room);
             if (!roomRenderers.ContainsKey(self.room))
@@ -155,6 +165,14 @@ namespace Tinker.Silk.Bridge
                     mesh.MoveVertice(vertIndex + 1, Vector2.zero);
                     mesh.MoveVertice(vertIndex + 2, Vector2.zero);
                     mesh.MoveVertice(vertIndex + 3, Vector2.zero);
+                }
+            }
+
+            public void SetVisible(bool visible)
+            {
+                if (mesh != null)
+                {
+                    mesh.isVisible = visible;
                 }
             }
 

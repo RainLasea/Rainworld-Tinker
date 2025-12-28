@@ -149,15 +149,18 @@ namespace Tinker.Silk.Bridge
         public BridgeAnchor startAnchor;
         public BridgeAnchor endAnchor;
         public Room room;
+        public bool slatedForDeletetion;
+        public float health;
 
         private float maxBridgeLength;
         private int nodeCount;
         private List<BridgeNode> physicsNodes;
-        private Vector2[] renderPoints;
+        public Vector2[] RenderPoints { get; private set; }
 
         private const float NODE_MASS = 0.1f;
         private const float GRAVITY = 0.1f;
         private const float DAMPING = 0.975f;
+        private const float INITIAL_HEALTH = 120f;
 
 
         public SilkBridge(BridgeAnchor start, BridgeAnchor end, Room room, float maxLength, int nodeCount = 15)
@@ -167,9 +170,11 @@ namespace Tinker.Silk.Bridge
             this.room = room;
             maxBridgeLength = maxLength;
             this.nodeCount = nodeCount;
+            this.slatedForDeletetion = false;
+            this.health = INITIAL_HEALTH;
 
             InitializePhysicsNodes();
-            renderPoints = new Vector2[nodeCount + 2];
+            RenderPoints = new Vector2[nodeCount + 2];
         }
 
 
@@ -200,12 +205,23 @@ namespace Tinker.Silk.Bridge
 
         public void Update()
         {
-            if (room == null) return;
+            if (room == null || slatedForDeletetion) return;
 
 
-            if (!startAnchor.IsValid(room) || !endAnchor.IsValid(room))
+            if (!startAnchor.IsValid(room) || !endAnchor.IsValid(room) || health <= 0f)
             {
-
+                if (health <= 0f && !slatedForDeletetion)
+                {
+                    // 确保只触发一次
+                    slatedForDeletetion = true;
+                    // 默认在中间断裂
+                    Vector2 breakPoint = GetPointOnSegment(SegmentCount / 2, 0.5f);
+                    BrokenSilkManager.TriggerBreakAnimation(GetRenderPath(), room, breakPoint);
+                }
+                else
+                {
+                    slatedForDeletetion = true;
+                }
                 return;
             }
 
@@ -288,31 +304,31 @@ namespace Tinker.Silk.Bridge
 
         private void UpdateRenderPoints()
         {
-            renderPoints[0] = startPoint;
+            RenderPoints[0] = startPoint;
 
             for (int i = 0; i < physicsNodes.Count; i++)
-                renderPoints[i + 1] = physicsNodes[i].pos;
+                RenderPoints[i + 1] = physicsNodes[i].pos;
 
-            renderPoints[nodeCount + 1] = endPoint;
+            RenderPoints[nodeCount + 1] = endPoint;
         }
 
-        public List<Vector2> GetRenderPath() => new List<Vector2>(renderPoints);
+        public List<Vector2> GetRenderPath() => new List<Vector2>(RenderPoints);
 
         public Vector2 GetClosestPoint(Vector2 worldPos, out int segIndex, out float t)
         {
             segIndex = 0;
             t = 0f;
 
-            if (renderPoints == null || renderPoints.Length < 2)
+            if (RenderPoints == null || RenderPoints.Length < 2)
                 return startPoint;
 
             float bestDist = float.MaxValue;
             Vector2 bestPoint = startPoint;
 
-            for (int i = 0; i < renderPoints.Length - 1; i++)
+            for (int i = 0; i < RenderPoints.Length - 1; i++)
             {
-                Vector2 a = renderPoints[i];
-                Vector2 b = renderPoints[i + 1];
+                Vector2 a = RenderPoints[i];
+                Vector2 b = RenderPoints[i + 1];
                 Vector2 ab = b - a;
                 float len2 = ab.sqrMagnitude;
                 float localT = len2 > 1e-6f ? Mathf.Clamp01(Vector2.Dot(worldPos - a, ab) / len2) : 0f;
@@ -372,6 +388,19 @@ namespace Tinker.Silk.Bridge
             }
         }
 
+        public void TakeDamage(float amount, Vector2 impactPoint)
+        {
+            if (slatedForDeletetion) return;
+            health -= amount;
+            if (health <= 0)
+            {
+                slatedForDeletetion = true;
+                BrokenSilkManager.TriggerBreakAnimation(GetRenderPath(), room, impactPoint);
+                room?.PlaySound(SoundID.Spear_Stick_In_Wall, startPoint, 0.8f, 1.2f);
+                room?.PlaySound(SoundID.Spear_Stick_In_Wall, endPoint, 0.8f, 1.2f);
+            }
+        }
+
         public Vector2 GetPointOnSegment(int segIndex, float t)
         {
             var path = GetRenderPath();
@@ -388,9 +417,9 @@ namespace Tinker.Silk.Bridge
 
             Vector2 playerPos = player.bodyChunks[0].pos;
 
-            for (int i = 0; i < renderPoints.Length - 1; i++)
+            for (int i = 0; i < RenderPoints.Length - 1; i++)
             {
-                float dist = DistanceToSegment(playerPos, renderPoints[i], renderPoints[i + 1]);
+                float dist = DistanceToSegment(playerPos, RenderPoints[i], RenderPoints[i + 1]);
                 if (dist < threshold) return true;
             }
 
@@ -409,8 +438,8 @@ namespace Tinker.Silk.Bridge
         }
 
 
-        public int SegmentCount => renderPoints != null ? renderPoints.Length - 1 : 0;
-        public bool IsActive => room != null && physicsNodes != null && physicsNodes.Count > 0 &&
+        public int SegmentCount => RenderPoints != null ? RenderPoints.Length - 1 : 0;
+        public bool IsActive => room != null && !slatedForDeletetion && physicsNodes != null && physicsNodes.Count > 0 &&
                                 startAnchor.IsValid(room) && endAnchor.IsValid(room);
 
         Vector2 IClimbableSilk.GetPointOnSegment(int segIndex, float t)

@@ -6,7 +6,7 @@ namespace Tinker
     public static class TinkerLanguageHint
     {
         private static readonly Menu.MenuScene.SceneID TinkerSceneID =
-            new Menu.MenuScene.SceneID("Tinker_Prototype_Scenes");
+            new Menu.MenuScene.SceneID("slugcat_tinker");
 
         public static void Init()
         {

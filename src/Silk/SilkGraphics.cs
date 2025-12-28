@@ -36,6 +36,7 @@ namespace tinker.Silk
         private const float FADE_THICKNESS_DECAY = 0.02f;
         private const float FADE_GRAVITY = 0.15f;
         private List<Vector2> lastRenderedPathCache;
+        private int shootAnimFrames;
 
         public SilkGraphics(Player player)
         {
@@ -47,6 +48,7 @@ namespace tinker.Silk
             this.spritesInitiated = false;
             this.currentTension = 0f;
             this.displayedTension = 0f;
+            this.shootAnimFrames = 0;
 
             fadingActive = false;
             fadingPath = null;
@@ -101,6 +103,11 @@ namespace tinker.Silk
                 return;
             }
 
+            if (lastDrawnMode == SilkMode.Retracted && silk.mode == SilkMode.ShootingOut)
+            {
+                shootAnimFrames = 3;
+                fadingActive = false;
+            }
 
             if (!fadingActive && lastDrawnMode != SilkMode.Retracted && silk.mode == SilkMode.Retracted && lastRenderedPathCache != null && lastRenderedPathCache.Count >= 2)
             {
@@ -113,7 +120,7 @@ namespace tinker.Silk
             float distance = Vector2.Distance(headPos, silkTipPos);
             UpdateTension(distance);
 
-            bool ropeShouldBeVisible = silk.mode != SilkMode.Retracted && silk.mode != SilkMode.Retracting && distance >= 3f;
+            bool ropeShouldBeVisible = (silk.mode != SilkMode.Retracted && silk.mode != SilkMode.Retracting && distance >= 3f) || shootAnimFrames > 0;
 
             wasPulling = silk.pullingObject;
 
@@ -137,6 +144,10 @@ namespace tinker.Silk
 
 
             lastDrawnMode = silk.mode;
+            if (shootAnimFrames > 0)
+            {
+                shootAnimFrames--;
+            }
         }
 
         private void CacheCurrentRenderPath()
@@ -224,7 +235,7 @@ namespace tinker.Silk
 
             float baseWidth = 3f;
             float width = silk.pullingObject ? baseWidth * 1.2f : baseWidth * (1f + displayedTension * 0.4f);
-            if (silk.mode == SilkMode.ShootingOut) width = baseWidth * 0.8f;
+            if (silk.mode == SilkMode.ShootingOut || shootAnimFrames > 0) width = baseWidth * 0.8f;
 
             int segmentCount = UpdateMeshVertices(width, camPos);
             ClearUnusedVertices(segmentCount);

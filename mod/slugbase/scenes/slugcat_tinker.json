@@ -1,6 +1,6 @@
 {
-  "id": "Tinker_Prototype_Scenes",
-  "scene_folder": "scenes/tinker - prototype",
+  "id": "slugcat_tinker",
+  "scene_folder": "scenes/slugcat - tinker",
 
   "images": [
     { "name": "Background", "pos": [385, 190], "depth": 3.7, "shader": "Basic" },
@@ -9,7 +9,7 @@
     { "name": "Building2",   "pos": [385, 190], "depth": 3.4, "shader": "Basic" },
     { "name": "Ground",      "pos": [365, 190], "depth": 2.8, "shader": "Basic" },
     { "name": "Building3",   "pos": [375, 190], "depth": 2.6, "shader": "Basic" },
-    { "name": "SlugCat",     "pos": [365, 190], "depth": 2.8, "shader": "Basic" }
+    { "name": "TinkerSlugCat",     "pos": [365, 190], "depth": 2.8, "shader": "Basic" }
   ],
 
   "idle_depths": [2.8],

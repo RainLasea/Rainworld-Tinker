@@ -11,7 +11,7 @@ using static SlugBase.Features.FeatureTypes;
 
 namespace tinker
 {
-    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.1.0")]
+    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.4.6")]
     public class Plugin : BaseUnityPlugin
     {
         public const string MOD_ID = "abysslasea.tinker";
@@ -29,6 +29,8 @@ namespace tinker
             Instance = this;
             Logger = base.Logger;
 
+            On.RainWorld.OnModsInit += RainWorld_OnModsInit_LoadResources;
+
             MouseAiming = PlayerBool("tinker/mouse_aiming");
             SilkFeatureEnabled = PlayerBool("tinker/silk_enabled");
 
@@ -38,26 +40,37 @@ namespace tinker
             MouseRender.Initialize();
             SilkBridgeManager.Initialize();
             SilkBridgeGraphics.Initialize();
+            BrokenSilkManager.Initialize();
+            SilkClimb.Init();
+            PlayerGraphicsHooks.Init();
 
+            //Demo
             TinkerLanguageHint.Init();
 
-            AntennaManager.Init();
-
             On.Player.Update += Player_Update;
+            // Creature_Update 已移到 BrokenSilkManager
         }
-
 
         public void OnDisable()
         {
+            On.RainWorld.OnModsInit -= RainWorld_OnModsInit_LoadResources;
+
             SilkAimInput.Cleanup();
             tinkerSilkData.Cleanup();
             MouseAimSystem.Cleanup();
             MouseRender.Cleanup();
+            BrokenSilkManager.Cleanup();
 
-            AntennaManager.Cleanup();
+            PlayerGraphicsHooks.Cleanup();
 
             On.Player.Update -= Player_Update;
             Instance = null;
+        }
+
+        private void RainWorld_OnModsInit_LoadResources(On.RainWorld.orig_OnModsInit orig, RainWorld self)
+        {
+            orig(self);
+            Futile.atlasManager.LoadAtlas("atlases/tinker_face");
         }
 
         private void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
