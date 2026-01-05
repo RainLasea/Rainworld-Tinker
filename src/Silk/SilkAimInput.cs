@@ -40,10 +40,10 @@ namespace tinker.Silk
             lastPlayerRoom.Clear();
         }
 
-        private static void PlayerGraphics_SuckedIntoShortCut(On.PlayerGraphics.orig_SuckedIntoShortCut orig, PlayerGraphics self, Vector2 shortCutPosition)
+        private static void PlayerGraphics_SuckedIntoShortCut(On.PlayerGraphics.orig_SuckedIntoShortCut self, PlayerGraphics selfGraphics, Vector2 shortCutPosition)
         {
-            orig(self, shortCutPosition);
-            if (self.owner is Player player)
+            self(selfGraphics, shortCutPosition);
+            if (selfGraphics.owner is Player player)
             {
                 SilkPhysics silk = tinkerSilkData.Get(player);
                 if (silk.Attached)
@@ -147,7 +147,7 @@ namespace tinker.Silk
 
             var bridgeState = SilkBridgeManager.GetBridgeModeState(self);
 
-            bool rightMouseDown = Input.GetMouseButton(1);
+            bool rightMouseDown = Input.GetKey(Options_Hook.SilkShootKey);
             bool leftMouseDown = Input.GetMouseButton(0);
             bool wasRightMouseDown = rightMouseDownLastFrame.GetValueOrDefault(playerNum);
             bool wasLeftMouseDown = leftMouseDownLastFrame.GetValueOrDefault(playerNum);
@@ -192,14 +192,9 @@ namespace tinker.Silk
                 if (leftMousePressed && !bridgeState.animating)
                 {
                     Vector2 D2 = bridgeState.point2;
-
-
                     Vector2 shootDir = GetMouseAimDirectionFromPoint(D2, self);
-
-
                     Vector2 mouseWorld = GetMouseWorldPosition();
                     bridgeState.ShootVirtualSilk(shootDir, D2, self.room, mouseWorld);
-
                     silk.Release();
                 }
             }

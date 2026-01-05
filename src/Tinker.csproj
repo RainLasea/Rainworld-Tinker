@@ -1,10 +1,14 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
     
-    <PropertyGroup>
-        <TargetFramework>net48</TargetFramework>
-        <LangVersion>11</LangVersion>
-        <DebugType>portable</DebugType>
-    </PropertyGroup>
+<PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>11</LangVersion>
+    <DebugType>portable</DebugType>
+    
+    <Version>0.5.0</Version>
+    <Description>The Tinker mod for Rain World</Description>
+    <Authors>AbyssLasea</Authors>
+</PropertyGroup>
     
     <ItemGroup>
         <Reference Include="../lib/*.dll">
@@ -18,6 +22,7 @@
       </Reference>
       <Reference Include="0Harmony20">
         <HintPath>G:\SteamLibrary\steamapps\common\Rain World\BepInEx\core\0Harmony20.dll</HintPath>
+        <Aliases>Harmony20</Aliases>
       </Reference>
       <Reference Include="Accessibility">
         <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\Accessibility.dll</HintPath>
@@ -43,11 +48,17 @@
       <Reference Include="mscorlib">
         <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\mscorlib.dll</HintPath>
       </Reference>
+      <Reference Include="Rewired_Core">
+        <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\Rewired_Core.dll</HintPath>
+      </Reference>
       <Reference Include="Unity.Mathematics">
         <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\Unity.Mathematics.dll</HintPath>
       </Reference>
       <Reference Include="Unity.TextMeshPro">
         <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+      </Reference>
+      <Reference Include="UnityEngine.AssetBundleModule">
+        <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\UnityEngine.AssetBundleModule.dll</HintPath>
       </Reference>
       <Reference Include="UnityEngine.ImageConversionModule">
         <HintPath>G:\SteamLibrary\steamapps\common\Rain World\RainWorld_Data\Managed\UnityEngine.ImageConversionModule.dll</HintPath>

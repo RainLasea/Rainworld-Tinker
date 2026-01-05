@@ -1,716 +1,88 @@
 ﻿using RWCustom;
 using System.Collections.Generic;
+using Tinker.Silk.Bridge;
 using Tinker.Silk.Collision;
 using UnityEngine;
-using Tinker.Silk.Bridge;
-using System;
 
 namespace tinker.Silk
 {
-    public enum SilkMode
-    {
-        Retracted,
-        ShootingOut,
-        AttachedToTerrain,
-        AttachedToObject,
-        Retracting
-    }
+    public enum SilkMode { Retracted, ShootingOut, AttachedToTerrain, AttachedToObject, Retracting }
 
     public class SilkPhysics
     {
         public Vector2 pos, lastPos, vel;
-        public SilkMode mode;
+        public SilkMode mode = SilkMode.Retracted;
         public Player player;
         public BodyChunk baseChunk;
         public Vector2 terrainStuckPos;
-        public BodyChunk attachedChunk;
         public PhysicalObject attachedObject;
-        public float idealRopeLength;
-        public float requestedRopeLength;
-        public float elastic;
-        public int attachedTime;
-        public bool returning;
-        private IntVector2[] _cachedRtList = new IntVector2[20];
-        public bool pullingObject;
-        public bool instantDisappear;
-
-        public SilkBridge attachedBridge = null;
+        public SilkBridge attachedBridge;
         private int attachedBridgeSeg = -1;
         private float attachedBridgeT = 0f;
-
+        public float idealRopeLength, requestedRopeLength, elastic;
+        public int attachedTime;
+        public bool returning, pullingObject, instantDisappear;
         private List<Vector2> ropeSegmentPoints = new List<Vector2>();
-
-        private struct Corner
-        {
-            public Vector2 pos;
-            public IntVector2 dir;
-
-            public Corner(Vector2 pos, IntVector2 dir)
-            {
-                this.pos = pos;
-                this.dir = dir;
-            }
-        }
-
-        private class SegmentBridgeInfo
-        {
-            public SilkBridge bridge;
-            public int segIndex;
-            public float t;
-        }
+        private List<int> segmentLastChanged = new List<int>();
         private List<SegmentBridgeInfo> segmentBridgeAttachments = new List<SegmentBridgeInfo>();
-
-        private const float MIN_ROPE_LENGTH = 0f;
-        private const float MAX_ROPE_LENGTH = 800f;
+        private const float MAX_ROPE_LENGTH = 1200f;
         private const float SHOOT_SPEED = 50f;
         private const float GRAVITY = 0.9f;
         private const float OBJECT_PULL_FORCE = 1.8f;
-
-        private int frameCounter = 0;
-        private List<int> segmentLastChanged = new List<int>();
-
-        private const float ADD_MIN_DISTANCE = 6f;
-        private const float REMOVE_MAX_DISTANCE_TO_LINE = 8f;
-        private const float ANGLE_REMOVE_COS = 0.985f;
         private const int COOLDOWN_FRAMES = 4;
-        private const int MAX_CHANGES_PER_UPDATE = 2;
-
-
-        private const float WALL_CLEARANCE = 1f;
-        private const float CORNER_DUAL_SIDE_EPS = 0.9f;
-        private const float PARALLEL_DOT_THRESHOLD = 0.35f;
-        private const float SLIDE_CLEAR_FORCE = 4f;
-        private const float MAX_NODE_WALL_PENETRATION = 5f;
-
-        private const float ROPE_THICKNESS = 1f;
-
+        private const float WALL_OFFSET = 1.5f;
+        private const int MAX_SEGMENTS = 50;
         private readonly ICollisionProvider collisionProvider;
+        private int frameCounter;
 
-        public SilkPhysics(Player player) : this(player, null) { }
-
-        public SilkPhysics(Player player, ICollisionProvider collisionProvider)
+        public SilkPhysics(Player player, ICollisionProvider collisionProvider = null)
         {
             this.player = player;
             this.baseChunk = player.bodyChunks[0];
-            pos = lastPos = baseChunk.pos;
-            mode = SilkMode.Retracted;
-            elastic = 0f;
-            attachedTime = 0;
-            pullingObject = false;
-            attachedBridge = null;
-            attachedBridgeSeg = -1;
-            attachedBridgeT = 0f;
-            instantDisappear = false;
-
             this.collisionProvider = collisionProvider ?? StaticCollisionProvider.Instance;
+            ResetState();
         }
 
         public bool Attached => mode == SilkMode.AttachedToTerrain || mode == SilkMode.AttachedToObject;
         public bool AttachedToItem => mode == SilkMode.AttachedToObject && attachedObject != null;
 
-        public List<Vector2> GetRopePath()
+        public void Update()
         {
-            List<Vector2> path = new List<Vector2>();
-            path.Add(baseChunk.pos);
-            path.AddRange(ropeSegmentPoints);
-            path.Add(pos);
-            return path;
-        }
-
-        public void Release(bool instant = false)
-        {
-            if (mode == SilkMode.Retracted) return;
-
-            if (instant)
+            if ((player.room == null || player.slatedForDeletetion) && Attached) { Release(true); return; }
+            lastPos = pos;
+            frameCounter++;
+            attachedTime = Attached ? attachedTime + 1 : 0;
+            switch (mode)
             {
-                instantDisappear = true;
+                case SilkMode.Retracted: UpdateRetracted(); break;
+                case SilkMode.ShootingOut: UpdateShootingOut(); break;
+                case SilkMode.AttachedToTerrain: UpdateAttachedToTerrain(); break;
+                case SilkMode.AttachedToObject: UpdateAttachedToObject(); break;
+                case SilkMode.Retracting: Release(); break;
             }
-
-            mode = SilkMode.Retracted;
-            attachedChunk = null;
-            attachedObject = null;
-            attachedBridge = null;
-            attachedBridgeSeg = -1;
-            attachedBridgeT = 0f;
-            requestedRopeLength = 0f;
-            elastic = 0f;
-            pullingObject = false;
-            returning = false;
-            ropeSegmentPoints.Clear();
-            segmentLastChanged.Clear();
-            segmentBridgeAttachments.Clear();
+            if (mode != SilkMode.Retracted && Attached)
+            {
+                Elasticity();
+                UpdateRopeLength();
+                UpdateRopeLogic();
+            }
         }
 
         public void Shoot(Vector2 direction)
         {
-            if (mode != SilkMode.Retracted) return;
-
+            ResetState();
             pos = lastPos = baseChunk.pos;
             vel = direction.normalized * SHOOT_SPEED;
             mode = SilkMode.ShootingOut;
             idealRopeLength = MAX_ROPE_LENGTH;
-            requestedRopeLength = 0f;
-            elastic = 0f;
-            returning = false;
-            pullingObject = false;
-            attachedBridge = null;
-            attachedBridgeSeg = -1;
-            attachedBridgeT = 0f;
-            ropeSegmentPoints.Clear();
-            segmentLastChanged.Clear();
-            segmentBridgeAttachments.Clear();
         }
 
-        public void Update()
-        {
-            if (player.room == null && Attached)
-            {
-                Release(true);
-            }
-
-            lastPos = pos;
-            frameCounter++;
-
-            if (Attached) attachedTime++;
-            else attachedTime = 0;
-
-            switch (mode)
-            {
-                case SilkMode.Retracted:
-                    UpdateRetracted();
-                    break;
-                case SilkMode.ShootingOut:
-                    UpdateShootingOut();
-                    break;
-                case SilkMode.AttachedToTerrain:
-                    UpdateAttachedToTerrain();
-                    break;
-                case SilkMode.AttachedToObject:
-                    UpdateAttachedToObject();
-                    break;
-                case SilkMode.Retracting:
-                    mode = SilkMode.Retracted;
-                    ropeSegmentPoints.Clear();
-                    segmentLastChanged.Clear();
-                    segmentBridgeAttachments.Clear();
-                    break;
-            }
-
-            if (mode != SilkMode.Retracted) Elasticity();
-
-            if (Attached)
-            {
-                UpdateRopeLength();
-                UpdateBridgeAttachedSegments();
-                UpdateRopeSegments();
-            }
-        }
-
-        private void UpdateRetracted()
-        {
-            requestedRopeLength = 0f;
-            pos = baseChunk.pos;
-            vel = baseChunk.vel;
-            ropeSegmentPoints.Clear();
-            segmentLastChanged.Clear();
-            segmentBridgeAttachments.Clear();
-        }
-
-        private void UpdateShootingOut()
-        {
-            vel.y -= GRAVITY * Mathf.InverseLerp(0.8f, 0f, elastic);
-            pos += vel;
-
-            bool collisionOccurred = false;
-
-            if (player.room == null) return;
-
-            if (collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, lastPos, pos, out SilkBridge hitBridge, out Vector2 hitPoint, out float hitT))
-            {
-                AttachToBridge(hitBridge, hitPoint);
-                collisionOccurred = true;
-            }
-
-            if (!collisionOccurred)
-            {
-
-                Vector2? terrainHitPoint = GetPreciseTerrainCollision(lastPos, pos);
-                if (terrainHitPoint.HasValue)
-                {
-                    IntVector2? pathCheck = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, baseChunk.pos, terrainHitPoint.Value);
-                    if (pathCheck == null)
-                    {
-                        AttachToTerrain(terrainHitPoint.Value);
-                        collisionOccurred = true;
-                    }
-                    else
-                    {
-                        pos = terrainHitPoint.Value;
-                        Release();
-                        collisionOccurred = true;
-                    }
-                }
-            }
-
-            if (!collisionOccurred && !Custom.DistLess(baseChunk.pos, pos, 60f))
-            {
-                PhysicalObject hitObject = CheckObjectCollision();
-                if (hitObject != null)
-                {
-                    AttachToObject(hitObject);
-                    collisionOccurred = true;
-                }
-            }
-
-            if (!collisionOccurred)
-            {
-                if (returning)
-                {
-                    pos += Custom.RNV() / 1000f;
-                    int rayCount = collisionProvider.RayTracedTilesArray(lastPos, pos, _cachedRtList);
-
-                    for (int i = 0; i < rayCount; i++)
-                    {
-                        if (player.room.GetTile(_cachedRtList[i]).horizontalBeam)
-                        {
-                            float midY = player.room.MiddleOfTile(_cachedRtList[i]).y;
-                            float crossX = Custom.HorizontalCrossPoint(lastPos, pos, midY).x;
-                            float clampedX = Mathf.Clamp(crossX, player.room.MiddleOfTile(_cachedRtList[i]).x - 10f,
-                                                          player.room.MiddleOfTile(_cachedRtList[i]).x + 10f);
-                            Vector2 attachPoint = new Vector2(clampedX, midY);
-
-                            IntVector2? pathCheck = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, baseChunk.pos, attachPoint);
-                            if (pathCheck == null)
-                            {
-                                AttachToTerrain(attachPoint);
-                            }
-                            else
-                            {
-                                pos = attachPoint;
-                                Release();
-                            }
-                            break;
-                        }
-                        if (player.room.GetTile(_cachedRtList[i]).verticalBeam)
-                        {
-                            float midX = player.room.MiddleOfTile(_cachedRtList[i]).x;
-                            float crossY = Custom.VerticalCrossPoint(lastPos, pos, midX).y;
-                            float clampedY = Mathf.Clamp(crossY, player.room.MiddleOfTile(_cachedRtList[i]).y - 10f,
-                                                          player.room.MiddleOfTile(_cachedRtList[i]).y + 10f);
-                            Vector2 attachPoint = new Vector2(midX, clampedY);
-
-                            IntVector2? pathCheck = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, baseChunk.pos, attachPoint);
-                            if (pathCheck == null)
-                            {
-                                AttachToTerrain(attachPoint);
-                            }
-                            else
-                            {
-                                pos = attachPoint;
-                                Release();
-                            }
-                            break;
-                        }
-                    }
-
-                    if (Custom.DistLess(baseChunk.pos, pos, 40f))
-                    {
-                        mode = SilkMode.Retracted;
-                        ropeSegmentPoints.Clear();
-                        segmentLastChanged.Clear();
-                        segmentBridgeAttachments.Clear();
-                    }
-                }
-                else if (Vector2.Dot(Custom.DirVec(baseChunk.pos, pos), vel.normalized) < 0f)
-                {
-                    returning = true;
-                }
-            }
-        }
-
-
-        private bool TryTerrainHit(Vector2 from, Vector2 to, out Vector2 hitPoint, out Vector2 wallNormal, out bool isCorner)
-        {
-            hitPoint = Vector2.zero;
-            wallNormal = Vector2.zero;
-            isCorner = false;
-            if (player.room == null) return false;
-
-            IntVector2? hitTile = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, from, to);
-            if (!hitTile.HasValue) return false;
-
-            FloatRect rect = player.room.TileRect(hitTile.Value);
-            Vector2? raw = GetRayRectIntersection(from, to, rect);
-            if (!raw.HasValue)
-            {
-
-                hitPoint = new Vector2(rect.left + rect.Width / 2f, rect.bottom + rect.Height / 2f);
-                wallNormal = (from - to).normalized;
-                return true;
-            }
-
-            Vector2 p = raw.Value;
-
-            float leftDist = Mathf.Abs(p.x - rect.left);
-            float rightDist = Mathf.Abs(p.x - rect.right);
-            float bottomDist = Mathf.Abs(p.y - rect.bottom);
-            float topDist = Mathf.Abs(p.y - rect.top);
-
-            bool hitLeft = leftDist < 0.01f;
-            bool hitRight = rightDist < 0.01f;
-            bool hitBottom = bottomDist < 0.01f;
-            bool hitTop = topDist < 0.01f;
-
-            int sideCount = (hitLeft ? 1 : 0) + (hitRight ? 1 : 0) + (hitBottom ? 1 : 0) + (hitTop ? 1 : 0);
-            isCorner = sideCount >= 2;
-
-            if (isCorner)
-            {
-                Vector2 n = Vector2.zero;
-                if (hitLeft) n += Vector2.left;
-                if (hitRight) n += Vector2.right;
-                if (hitBottom) n += Vector2.down;
-                if (hitTop) n += Vector2.up;
-                wallNormal = n.normalized;
-            }
-            else
-            {
-                if (hitLeft) wallNormal = Vector2.left;
-                else if (hitRight) wallNormal = Vector2.right;
-                else if (hitBottom) wallNormal = Vector2.down;
-                else if (hitTop) wallNormal = Vector2.up;
-                else wallNormal = (from - to).normalized;
-            }
-
-
-            hitPoint = p + wallNormal * WALL_CLEARANCE;
-            return true;
-        }
-
-        private Vector2? GetPreciseTerrainCollision(Vector2 from, Vector2 to)
-        {
-            if (TryTerrainHit(from, to, out Vector2 hp, out Vector2 normal, out bool corner))
-            {
-                return hp;
-            }
-            return null;
-        }
-
-        private Vector2? GetRayRectIntersection(Vector2 from, Vector2 to, FloatRect rect)
-        {
-            Vector2 direction = to - from;
-            Vector2 closest = from;
-            float closestDist = float.MaxValue;
-            bool found = false;
-
-            if (direction.x != 0)
-            {
-                float t = (rect.left - from.x) / direction.x;
-                if (t >= 0 && t <= 1)
-                {
-                    float y = from.y + t * direction.y;
-                    if (y >= rect.bottom && y <= rect.top)
-                    {
-                        Vector2 point = new Vector2(rect.left, y);
-                        float dist = Vector2.Distance(from, point);
-                        if (dist < closestDist)
-                        {
-                            closestDist = dist;
-                            closest = point;
-                            found = true;
-                        }
-                    }
-                }
-            }
-
-            if (direction.x != 0)
-            {
-                float t = (rect.right - from.x) / direction.x;
-                if (t >= 0 && t <= 1)
-                {
-                    float y = from.y + t * direction.y;
-                    if (y >= rect.bottom && y <= rect.top)
-                    {
-                        Vector2 point = new Vector2(rect.right, y);
-                        float dist = Vector2.Distance(from, point);
-                        if (dist < closestDist)
-                        {
-                            closestDist = dist;
-                            closest = point;
-                            found = true;
-                        }
-                    }
-                }
-            }
-
-            if (direction.y != 0)
-            {
-                float t = (rect.bottom - from.y) / direction.y;
-                if (t >= 0 && t <= 1)
-                {
-                    float x = from.x + t * direction.x;
-                    if (x >= rect.left && x <= rect.right)
-                    {
-                        Vector2 point = new Vector2(x, rect.bottom);
-                        float dist = Vector2.Distance(from, point);
-                        if (dist < closestDist)
-                        {
-                            closestDist = dist;
-                            closest = point;
-                            found = true;
-                        }
-                    }
-                }
-            }
-
-            if (direction.y != 0)
-            {
-                float t = (rect.top - from.y) / direction.y;
-                if (t >= 0 && t <= 1)
-                {
-                    float x = from.x + t * direction.x;
-                    if (x >= rect.left && x <= rect.right)
-                    {
-                        Vector2 point = new Vector2(x, rect.top);
-                        float dist = Vector2.Distance(from, point);
-                        if (dist < closestDist)
-                        {
-                            closestDist = dist;
-                            closest = point;
-                            found = true;
-                        }
-                    }
-                }
-            }
-
-            return found ? (Vector2?)closest : null;
-        }
-
-        private void UpdateBridgeAttachedSegments()
-        {
-            while (segmentBridgeAttachments.Count < ropeSegmentPoints.Count)
-                segmentBridgeAttachments.Add(null);
-            while (segmentBridgeAttachments.Count > ropeSegmentPoints.Count)
-                segmentBridgeAttachments.RemoveAt(segmentBridgeAttachments.Count - 1);
-
-            for (int i = 0; i < ropeSegmentPoints.Count; i++)
-            {
-                if (segmentBridgeAttachments[i] != null)
-                {
-                    var info = segmentBridgeAttachments[i];
-
-                    if (info.bridge == null || info.bridge.room != player.room)
-                    {
-                        segmentBridgeAttachments[i] = null;
-                        continue;
-                    }
-
-                    Vector2 newPos = info.bridge.GetPointOnSegment(info.segIndex, info.t);
-                    ropeSegmentPoints[i] = newPos;
-                }
-            }
-        }
-
-        private void UpdateRopeSegments()
-        {
-            if (player.room == null || !Attached) return;
-
-            while (segmentLastChanged.Count < ropeSegmentPoints.Count) segmentLastChanged.Add(0);
-            while (segmentLastChanged.Count > ropeSegmentPoints.Count) segmentLastChanged.RemoveAt(segmentLastChanged.Count - 1);
-
-            RemoveUnnecessarySegments();
-            AddNecessarySegments();
-            SlideNodesOffObstacles();
-
-            while (segmentLastChanged.Count < ropeSegmentPoints.Count) segmentLastChanged.Add(frameCounter);
-            while (segmentLastChanged.Count > ropeSegmentPoints.Count) segmentLastChanged.RemoveAt(segmentLastChanged.Count - 1);
-            while (segmentBridgeAttachments.Count < ropeSegmentPoints.Count) segmentBridgeAttachments.Add(null);
-            while (segmentBridgeAttachments.Count > ropeSegmentPoints.Count) segmentBridgeAttachments.RemoveAt(segmentBridgeAttachments.Count - 1);
-        }
-
-
-        private void SlideNodesOffObstacles()
-        {
-            for (int i = 0; i < ropeSegmentPoints.Count; i++)
-            {
-                if (segmentBridgeAttachments[i] != null) continue;
-                if (frameCounter - segmentLastChanged[i] < COOLDOWN_FRAMES) continue;
-
-                Vector2 point = ropeSegmentPoints[i];
-                Vector2 prevPoint = (i == 0) ? baseChunk.pos : ropeSegmentPoints[i - 1];
-                Vector2 nextPoint = (i == ropeSegmentPoints.Count - 1) ? pos : ropeSegmentPoints[i + 1];
-
-                Vector2 toPrev = (prevPoint - point).normalized;
-                Vector2 toNext = (nextPoint - point).normalized;
-                float dotProduct = Vector2.Dot(toPrev, toNext);
-
-
-                IntVector2? tileProbe = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, prevPoint, point);
-                if (tileProbe.HasValue)
-                {
-                    FloatRect rect = player.room.TileRect(tileProbe.Value);
-                    Vector2 normal;
-                    bool corner;
-
-                    TryTerrainHit(prevPoint, point, out Vector2 hitP, out normal, out corner);
-                    Vector2 slideTarget = point + normal * Mathf.Min(WALL_CLEARANCE * 2f, MAX_NODE_WALL_PENETRATION);
-                    IntVector2? blockA = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, prevPoint, slideTarget);
-                    IntVector2? blockB = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, nextPoint, slideTarget);
-
-                    if (!blockA.HasValue && !blockB.HasValue)
-                    {
-                        ropeSegmentPoints[i] = slideTarget;
-                        segmentLastChanged[i] = frameCounter;
-                        continue;
-                    }
-                }
-
-                if (dotProduct < -0.5f)
-                {
-                    Vector2 resultantForce = (toPrev + toNext).normalized;
-                    Vector2 slideTarget = point + resultantForce * SLIDE_CLEAR_FORCE;
-
-                    IntVector2? obstacleFromPrev = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, prevPoint, slideTarget);
-                    IntVector2? obstacleFromNext = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, nextPoint, slideTarget);
-
-                    if (!obstacleFromPrev.HasValue && !obstacleFromNext.HasValue)
-                    {
-                        ropeSegmentPoints[i] = slideTarget;
-                        segmentLastChanged[i] = frameCounter;
-                    }
-                }
-            }
-        }
-
-        private void RemoveUnnecessarySegments()
-        {
-            if (ropeSegmentPoints.Count == 0) return;
-
-            List<int> indicesToRemove = new List<int>();
-            int changes = 0;
-
-            for (int i = 0; i < ropeSegmentPoints.Count && changes < MAX_CHANGES_PER_UPDATE; i++)
-            {
-                if (frameCounter - segmentLastChanged[i] < COOLDOWN_FRAMES) continue;
-
-                if (segmentBridgeAttachments[i] != null) continue;
-
-                Vector2 prev = (i == 0) ? baseChunk.pos : ropeSegmentPoints[i - 1];
-                Vector2 point = ropeSegmentPoints[i];
-                Vector2 next = (i == ropeSegmentPoints.Count - 1) ? pos : ropeSegmentPoints[i + 1];
-
-                bool directPathIsClear = !collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, prev, next).HasValue &&
-                                         !collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, prev, next, out _, out _, out _);
-
-                if (directPathIsClear)
-                {
-                    indicesToRemove.Add(i);
-                    changes++;
-                    continue;
-                }
-
-                IntVector2 tilePos = player.room.GetTilePosition(point);
-                List<Corner> corners = GetCornersForTile(tilePos.x, tilePos.y);
-                corners.AddRange(GetCornersForTile(tilePos.x - 1, tilePos.y));
-                corners.AddRange(GetCornersForTile(tilePos.x + 1, tilePos.y));
-                corners.AddRange(GetCornersForTile(tilePos.x, tilePos.y - 1));
-                corners.AddRange(GetCornersForTile(tilePos.x, tilePos.y + 1));
-
-                bool isNecessary = false;
-                foreach (var corner in corners)
-                {
-                    if (Vector2.Distance(point, corner.pos) < 2f && DoesLineOverlapCorner(prev, next, corner))
-                    {
-                        isNecessary = true;
-                        break;
-                    }
-                }
-
-                if (!isNecessary)
-                {
-                    indicesToRemove.Add(i);
-                    changes++;
-                }
-            }
-
-            if (indicesToRemove.Count > 0)
-            {
-                for (int i = indicesToRemove.Count - 1; i >= 0; i--)
-                {
-                    int index = indicesToRemove[i];
-                    ropeSegmentPoints.RemoveAt(index);
-                    segmentLastChanged.RemoveAt(index);
-                    segmentBridgeAttachments.RemoveAt(index);
-                }
-            }
-        }
-
-        private bool IsNecessaryCornerPoint(Vector2 point, Vector2 start, Vector2 end)
-        {
-            if (player.room == null) return false;
-
-            IntVector2? directPath = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, start, end);
-            if (!directPath.HasValue) return false;
-
-
-            Vector2 toPoint = (point - start).normalized;
-            Vector2 fromPoint = (end - point).normalized;
-            float angleDot = Vector2.Dot(toPoint, fromPoint);
-            if (angleDot > 0.8f) return false;
-
-
-            IntVector2? startToPoint = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, start, point);
-            IntVector2? pointToEnd = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, point, end);
-            if (!startToPoint.HasValue || !pointToEnd.HasValue) return false;
-
-            return true;
-        }
-
-        private void AddNecessarySegments()
-        {
-            int changes = 0;
-            for (int i = 0; i < TotalRopeSegments() - 1 && changes < MAX_CHANGES_PER_UPDATE; i++)
-            {
-                Vector2 currentStart = GetRopePoint(i);
-                Vector2 next = GetRopePoint(i + 1);
-
-                if (collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, currentStart, next, out SilkBridge bridge, out Vector2 bridgePoint, out float t))
-                {
-                    Vector2 stable = bridge.GetClosestPoint(bridgePoint, out int segIndex, out float tval);
-
-                    ropeSegmentPoints.Insert(i, stable);
-                    segmentLastChanged.Insert(i, frameCounter);
-                    segmentBridgeAttachments.Insert(i, new SegmentBridgeInfo { bridge = bridge, segIndex = segIndex, t = tval });
-                    changes++;
-                    i--;
-                    continue;
-                }
-
-                if (TryTerrainHit(currentStart, next, out Vector2 hitPoint, out Vector2 wallNormal, out bool isCorner))
-                {
-                    Vector2 insertionPoint = hitPoint + wallNormal * 0.1f;
-
-                    if ((i > 0 && Vector2.Distance(insertionPoint, ropeSegmentPoints[i - 1]) < 1f) ||
-                        (Vector2.Distance(insertionPoint, currentStart) < 1f))
-                    {
-                        continue;
-                    }
-
-                    ropeSegmentPoints.Insert(i, insertionPoint);
-                    segmentLastChanged.Insert(i, frameCounter);
-                    segmentBridgeAttachments.Insert(i, null);
-                    changes++;
-                    i--;
-                }
-            }
-        }
+        public void Release(bool instant = false) { instantDisappear = instant; ResetState(); }
 
         public void DetachPhysicsOnly()
         {
             if (!Attached) return;
-
             mode = SilkMode.Retracted;
-            attachedChunk = null;
             attachedObject = null;
             attachedBridge = null;
             attachedBridgeSeg = -1;
@@ -723,425 +95,293 @@ namespace tinker.Silk
             segmentBridgeAttachments.Clear();
         }
 
-        private PhysicalObject CheckObjectCollision()
+        public List<Vector2> GetRopePath()
         {
-            if (player.room == null) return null;
-
-            foreach (var obj in player.room.physicalObjects)
-            {
-                foreach (var item in obj)
-                {
-                    if (item == player) continue;
-
-                    bool isPullableItem = item is Weapon ||
-                                         item is DangleFruit ||
-                                         item is SporePlant ||
-                                         item is DataPearl ||
-                                         item is Rock ||
-                                         item is ScavengerBomb ||
-                                         item is Spear ||
-                                         item is FirecrackerPlant;
-
-                    if (!isPullableItem) continue;
-
-                    for (int i = 0; i < item.bodyChunks.Length; i++)
-                    {
-                        BodyChunk chunk = item.bodyChunks[i];
-                        float distance = Vector2.Distance(pos, chunk.pos);
-
-                        if (distance < chunk.rad + 5f)
-                        {
-                            return item;
-                        }
-                    }
-                }
-            }
-
-            return null;
+            var list = new List<Vector2> { baseChunk.pos };
+            list.AddRange(ropeSegmentPoints);
+            list.Add(pos);
+            return list;
         }
 
-        private void UpdateAttachedToTerrain()
+        private void ResetState()
         {
-            if (attachedBridge != null)
-            {
-                if (attachedBridge.room != player.room || !SilkBridgeManager.GetBridgesInRoom(player.room).Contains(attachedBridge))
-                {
-                    attachedBridge = null;
-                    attachedBridgeSeg = -1;
-                    attachedBridgeT = 0f;
-                    mode = SilkMode.Retracting;
-                    ropeSegmentPoints.Clear();
-                    segmentLastChanged.Clear();
-                    segmentBridgeAttachments.Clear();
-                    return;
-                }
-
-                Vector2 newAttachPos = attachedBridge.GetPointOnSegment(attachedBridgeSeg, attachedBridgeT);
-                Vector2 bridgeMovement = newAttachPos - terrainStuckPos;
-                vel = bridgeMovement;
-
-                terrainStuckPos = newAttachPos;
-                pos = newAttachPos;
-            }
-            else
-            {
-                pos = terrainStuckPos;
-                vel = Vector2.zero;
-            }
-
-            if (attachedBridge != null && pullingObject)
-            {
-                PullAttachedBridge();
-            }
-        }
-
-        private void UpdateAttachedToObject()
-        {
-            if (attachedObject != null)
-            {
-                pos = attachedObject.bodyChunks[0].pos;
-                vel = attachedObject.bodyChunks[0].vel;
-
-                if (attachedObject.room != player.room)
-                {
-                    mode = SilkMode.Retracting;
-                    attachedObject = null;
-                    attachedChunk = null;
-                    ropeSegmentPoints.Clear();
-                    segmentLastChanged.Clear();
-                    segmentBridgeAttachments.Clear();
-                }
-
-                if (pullingObject) PullAttachedObject();
-            }
-            else if (attachedChunk != null)
-            {
-                pos = attachedChunk.pos;
-                vel = attachedChunk.vel;
-
-                if (attachedChunk.owner.room != player.room)
-                {
-                    mode = SilkMode.Retracting;
-                    attachedChunk = null;
-                    ropeSegmentPoints.Clear();
-                    segmentLastChanged.Clear();
-                    segmentBridgeAttachments.Clear();
-                }
-            }
-            else
-            {
-                mode = SilkMode.Retracting;
-                ropeSegmentPoints.Clear();
-                segmentLastChanged.Clear();
-                segmentBridgeAttachments.Clear();
-            }
-        }
-
-        private void PullAttachedBridge()
-        {
-            if (attachedBridge == null) return;
-
-            Vector2 toPlayer = baseChunk.pos - pos;
-            float dist = toPlayer.magnitude;
-            if (dist < 10f) return;
-
-            Vector2 pullDir = toPlayer.normalized;
-            float pullStrength = Mathf.Clamp(dist * 0.2f, 0.5f, 20f);
-
-            Vector2 force = pullDir * pullStrength;
-            attachedBridge.ApplyForceAt(pos, force, 32f);
-        }
-
-        private void PullAttachedObject()
-        {
-            if (attachedObject == null || attachedObject.bodyChunks == null) return;
-
-            Vector2 toPlayer = baseChunk.pos - pos;
-            float distance = toPlayer.magnitude;
-
-            if (distance < 20f)
-            {
-                pullingObject = false;
-                return;
-            }
-
-            Vector2 pullDirection = toPlayer.normalized;
-
-            foreach (BodyChunk chunk in attachedObject.bodyChunks)
-            {
-                float mass = chunk.mass;
-                float adjustedForce = OBJECT_PULL_FORCE / Mathf.Max(mass, 0.5f);
-                chunk.vel += pullDirection * adjustedForce;
-                if (chunk.vel.magnitude > 25f)
-                {
-                    chunk.vel = chunk.vel.normalized * 25f;
-                }
-            }
-        }
-
-        private void UpdateRopeLength()
-        {
-            if (pullingObject) return;
-
-            elastic = Mathf.Max(0f, elastic - 0.05f);
-
-            if (requestedRopeLength < idealRopeLength)
-            {
-                requestedRopeLength = Mathf.Min(requestedRopeLength + (1f - elastic) * 10f, idealRopeLength);
-            }
-            else if (requestedRopeLength > idealRopeLength)
-            {
-                requestedRopeLength = Mathf.Max(requestedRopeLength - (1f - elastic) * 10f, idealRopeLength);
-            }
-
-            requestedRopeLength = Mathf.Clamp(requestedRopeLength, MIN_ROPE_LENGTH, MAX_ROPE_LENGTH);
-        }
-
-        public void Elasticity()
-        {
-            if (mode == SilkMode.Retracted) return;
-            if (requestedRopeLength <= 0f) return;
-
-            List<Vector2> ropePath = GetRopePath();
-            float totalRopeLength = 0f;
-
-            for (int i = 0; i < ropePath.Count - 1; i++)
-            {
-                totalRopeLength += Vector2.Distance(ropePath[i], ropePath[i + 1]);
-            }
-
-            if (totalRopeLength > requestedRopeLength)
-            {
-                float excessLength = totalRopeLength - requestedRopeLength;
-
-                Vector2 firstTarget = ropeSegmentPoints.Count > 0 ? ropeSegmentPoints[0] : pos;
-                Vector2 delta = firstTarget - baseChunk.pos;
-                Vector2 pullDir = delta.normalized;
-                float pullAmount = Mathf.Min(excessLength * 0.6f, 15f);
-                Vector2 correction = pullDir * pullAmount;
-
-                baseChunk.pos += correction;
-                baseChunk.vel -= Vector2.Dot(baseChunk.vel, pullDir) * pullDir * 0.4f;
-
-                if (attachedBridge != null && mode == SilkMode.AttachedToTerrain)
-                {
-                    Vector2 reactionForce = -correction * 2f;
-                    attachedBridge.ApplyForceAt(pos, reactionForce, 24f);
-                }
-
-                elastic = Mathf.Min(elastic + 0.15f, 0.8f);
-            }
-        }
-
-        private void AttachToTerrain(Vector2 pos)
-        {
-            terrainStuckPos = pos;
-            this.pos = pos;
-            vel = Vector2.zero;
-            mode = SilkMode.AttachedToTerrain;
-
-            float currentDist = Vector2.Distance(baseChunk.pos, terrainStuckPos);
-            idealRopeLength = Mathf.Clamp(currentDist, MIN_ROPE_LENGTH, MAX_ROPE_LENGTH);
-            requestedRopeLength = idealRopeLength;
-            elastic = 0f;
-            pullingObject = false;
+            mode = SilkMode.Retracted;
+            attachedObject = null;
             attachedBridge = null;
-            attachedBridgeSeg = -1;
-            attachedBridgeT = 0f;
+            requestedRopeLength = elastic = 0f;
+            pullingObject = returning = false;
             ropeSegmentPoints.Clear();
             segmentLastChanged.Clear();
             segmentBridgeAttachments.Clear();
+        }
+
+        private void UpdateRetracted() => pos = lastPos = baseChunk.pos;
+
+        private void UpdateShootingOut()
+        {
+            vel.y -= GRAVITY * Mathf.InverseLerp(0.8f, 0f, elastic);
+            Vector2 nextPos = pos + vel;
+            if (Vector2.Distance(baseChunk.pos, nextPos) > MAX_ROPE_LENGTH) { Release(); return; }
+            if (collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, pos, nextPos, out var bridge, out var hitP, out _))
+            {
+                AttachToBridge(bridge, hitP);
+                return;
+            }
+            if (TraceTerrainCollision(pos, nextPos, out Vector2 terrainHit, out Vector2 normal))
+            {
+                Vector2 safePos = terrainHit + normal * WALL_OFFSET;
+                if (collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, baseChunk.pos, safePos) == null)
+                    AttachToTerrain(safePos);
+                else
+                {
+                    pos = safePos;
+                    Release();
+                }
+                return;
+            }
+            PhysicalObject hitObj = CheckObjectCollision(nextPos);
+            if (hitObj != null && !Custom.DistLess(baseChunk.pos, nextPos, 60f))
+            {
+                pos = nextPos;
+                AttachToObject(hitObj);
+                return;
+            }
+            pos = nextPos;
+            if (returning || Vector2.Dot(Custom.DirVec(baseChunk.pos, pos), vel.normalized) < -0.1f)
+            {
+                returning = true;
+                pos += (baseChunk.pos - pos).normalized * 5f;
+                if (Custom.DistLess(baseChunk.pos, pos, 40f)) ResetState();
+            }
+        }
+
+        private void UpdateRopeLogic()
+        {
+            for (int i = 0; i < segmentBridgeAttachments.Count; i++)
+            {
+                var info = segmentBridgeAttachments[i];
+                if (info?.bridge != null && info.bridge.room == player.room)
+                    ropeSegmentPoints[i] = info.bridge.GetPointOnSegment(info.segIndex, info.t);
+            }
+            RemoveUnnecessarySegments();
+            AddNecessarySegments();
+            SlideNodesOffObstacles();
+        }
+
+        private void AttachToTerrain(Vector2 hitPos)
+        {
+            terrainStuckPos = pos = hitPos;
+            vel = Vector2.zero;
+            mode = SilkMode.AttachedToTerrain;
+            SetupRopeAfterAttach();
         }
 
         private void AttachToBridge(SilkBridge bridge, Vector2 point)
         {
-            if (bridge == null) return;
             attachedBridge = bridge;
-
-            attachedBridgeSeg = 0;
-            attachedBridgeT = 0f;
-            Vector2 hit = bridge.GetClosestPoint(point, out int seg, out float t);
-            attachedBridgeSeg = seg;
-            attachedBridgeT = t;
-
-            terrainStuckPos = hit;
-            pos = hit;
-            vel = Vector2.zero;
+            terrainStuckPos = pos = bridge.GetClosestPoint(point, out attachedBridgeSeg, out attachedBridgeT);
             mode = SilkMode.AttachedToTerrain;
-
-            float currentDist = Vector2.Distance(baseChunk.pos, terrainStuckPos);
-            idealRopeLength = Mathf.Clamp(currentDist, MIN_ROPE_LENGTH, MAX_ROPE_LENGTH);
-            requestedRopeLength = idealRopeLength;
-            elastic = 0f;
-            pullingObject = false;
-            ropeSegmentPoints.Clear();
-            segmentLastChanged.Clear();
-            segmentBridgeAttachments.Clear();
+            SetupRopeAfterAttach();
         }
 
         private void AttachToObject(PhysicalObject obj)
         {
             attachedObject = obj;
-            attachedChunk = obj.bodyChunks[0];
-            pos = attachedChunk.pos;
-            vel = attachedChunk.vel;
+            pos = obj.bodyChunks[0].pos;
             mode = SilkMode.AttachedToObject;
+            SetupRopeAfterAttach();
+        }
 
-            float currentDist = Vector2.Distance(baseChunk.pos, pos);
-            idealRopeLength = Mathf.Clamp(currentDist, MIN_ROPE_LENGTH, MAX_ROPE_LENGTH);
-            requestedRopeLength = idealRopeLength;
-            elastic = 0f;
-            pullingObject = false;
+        private void SetupRopeAfterAttach()
+        {
+            idealRopeLength = requestedRopeLength = Mathf.Clamp(Vector2.Distance(baseChunk.pos, pos), 0, MAX_ROPE_LENGTH);
             ropeSegmentPoints.Clear();
             segmentLastChanged.Clear();
             segmentBridgeAttachments.Clear();
         }
 
-        private float DistancePointToLine(Vector2 point, Vector2 lineStart, Vector2 lineEnd)
+        private void Elasticity()
         {
-            Vector2 line = lineEnd - lineStart;
-            float lineLength = line.magnitude;
-            if (lineLength < 0.001f) return Vector2.Distance(point, lineStart);
-
-            Vector2 normalizedLine = line / lineLength;
-            Vector2 toPoint = point - lineStart;
-            float t = Mathf.Clamp01(Vector2.Dot(toPoint, normalizedLine) / lineLength);
-            Vector2 projection = lineStart + t * line;
-
-            return Vector2.Distance(point, projection);
-        }
-
-        #region Rope Collision Logic
-
-        private bool DoesLineOverlapCorner(Vector2 l1, Vector2 l2, Corner corner)
-        {
-            IntVector2 cornerDir = corner.dir;
-            bool horizontalCheck = (l1.y == l2.y) ||
-                                   ((cornerDir.x > 0 && Custom.HorizontalCrossPoint(l1, l2, corner.pos.y).x <= corner.pos.x) ||
-                                    (cornerDir.x < 0 && Custom.HorizontalCrossPoint(l1, l2, corner.pos.y).x >= corner.pos.x));
-
-            bool verticalCheck = (l1.x == l2.x) ||
-                                 ((cornerDir.y > 0 && Custom.VerticalCrossPoint(l1, l2, corner.pos.x).y <= corner.pos.y) ||
-                                  (cornerDir.y < 0 && Custom.VerticalCrossPoint(l1, l2, corner.pos.x).y >= corner.pos.y));
-
-            return horizontalCheck && verticalCheck;
-        }
-
-        private List<Corner> GetCornersForTile(int i, int j)
-        {
-            List<Corner> corners = new List<Corner>();
-            if (!player.room.GetTile(i, j).Solid) return corners;
-
-            Vector2 tileCenter = player.room.MiddleOfTile(i, j);
-
-            if (!player.room.GetTile(i - 1, j).Solid && !player.room.GetTile(i, j - 1).Solid && !player.room.GetTile(i - 1, j - 1).Solid)
+            float totalLen = GetTotalRopeLength();
+            if (totalLen > requestedRopeLength)
             {
-                corners.Add(new Corner(tileCenter + new Vector2(-10f - ROPE_THICKNESS, -10f - ROPE_THICKNESS), new IntVector2(-1, -1)));
+                Vector2 target = ropeSegmentPoints.Count > 0 ? ropeSegmentPoints[0] : pos;
+                Vector2 pullDir = (target - baseChunk.pos).normalized;
+                float pull = Mathf.Min((totalLen - requestedRopeLength) * 0.6f, 15f);
+                baseChunk.pos += pullDir * pull;
+                baseChunk.vel -= Vector2.Dot(baseChunk.vel, pullDir) * pullDir * 0.4f;
+                elastic = Mathf.Min(elastic + 0.15f, 0.8f);
             }
-            if (!player.room.GetTile(i + 1, j).Solid && !player.room.GetTile(i, j - 1).Solid && !player.room.GetTile(i + 1, j - 1).Solid)
-            {
-                corners.Add(new Corner(tileCenter + new Vector2(10f + ROPE_THICKNESS, -10f - ROPE_THICKNESS), new IntVector2(1, -1)));
-            }
-            if (!player.room.GetTile(i - 1, j).Solid && !player.room.GetTile(i, j + 1).Solid && !player.room.GetTile(i - 1, j + 1).Solid)
-            {
-                corners.Add(new Corner(tileCenter + new Vector2(-10f - ROPE_THICKNESS, 10f + ROPE_THICKNESS), new IntVector2(-1, 1)));
-            }
-            if (!player.room.GetTile(i + 1, j).Solid && !player.room.GetTile(i, j + 1).Solid && !player.room.GetTile(i + 1, j + 1).Solid)
-            {
-                corners.Add(new Corner(tileCenter + new Vector2(10f + ROPE_THICKNESS, 10f + ROPE_THICKNESS), new IntVector2(1, 1)));
-            }
-
-            return corners;
         }
 
-        #endregion
-
-        private int TotalRopeSegments()
+        private float GetTotalRopeLength()
         {
-            return ropeSegmentPoints.Count + 2;
-        }
-
-        private Vector2 GetRopePoint(int index)
-        {
-            if (index == 0) return baseChunk.pos;
-            if (index > ropeSegmentPoints.Count) return pos;
-            return ropeSegmentPoints[index - 1];
-        }
-    }
-
-    public static class SilkPhysicsUtil
-    {
-
-        public static bool TryFindLandingPoint(
-            Room room,
-            Vector2 from,
-            Vector2 to,
-            out Vector2 landingPoint,
-            out SilkBridge bridge,
-            out PhysicalObject obj)
-        {
-            landingPoint = to;
-            bridge = null;
-            obj = null;
-
-            IntVector2? terrainBlock = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, to);
-            if (terrainBlock.HasValue)
+            float len = Vector2.Distance(baseChunk.pos, ropeSegmentPoints.Count > 0 ? ropeSegmentPoints[0] : pos);
+            for (int i = 0; i < ropeSegmentPoints.Count; i++)
             {
-                FloatRect tileRect = room.TileRect(terrainBlock.Value);
-                landingPoint = GetPreciseTerrainCollisionForPreview(room, from, to) ?? to;
+                Vector2 next = (i == ropeSegmentPoints.Count - 1) ? pos : ropeSegmentPoints[i + 1];
+                len += Vector2.Distance(ropeSegmentPoints[i], next);
+            }
+            return len;
+        }
+
+        private void UpdateRopeLength()
+        {
+            if (pullingObject) return;
+            elastic = Mathf.Max(0f, elastic - 0.05f);
+            requestedRopeLength = Mathf.MoveTowards(requestedRopeLength, idealRopeLength, (1f - elastic) * 10f);
+        }
+
+        private PhysicalObject CheckObjectCollision(Vector2 checkPos)
+        {
+            if (player.room?.physicalObjects == null) return null;
+            for (int i = 0; i < player.room.physicalObjects.Length; i++)
+            {
+                for (int j = 0; j < player.room.physicalObjects[i].Count; j++)
+                {
+                    PhysicalObject item = player.room.physicalObjects[i][j];
+                    if (item == player || !IsPullable(item)) continue;
+                    for (int k = 0; k < item.bodyChunks.Length; k++)
+                        if (Custom.DistLess(checkPos, item.bodyChunks[k].pos, item.bodyChunks[k].rad + 5f)) return item;
+                }
+            }
+            return null;
+        }
+
+        private bool IsPullable(PhysicalObject o) => o is Weapon || o is DangleFruit || o is Rock || o is Spear || o is DataPearl;
+
+        private void UpdateAttachedToTerrain()
+        {
+            if (attachedBridge != null)
+            {
+                if (attachedBridge.room != player.room) { Release(); return; }
+                pos = terrainStuckPos = attachedBridge.GetPointOnSegment(attachedBridgeSeg, attachedBridgeT);
+                if (pullingObject) attachedBridge.ApplyForceAt(pos, (baseChunk.pos - pos).normalized * 5f, 32f);
+            }
+            else pos = terrainStuckPos;
+        }
+
+        private void UpdateAttachedToObject()
+        {
+            if (attachedObject == null || attachedObject.room != player.room) { Release(); return; }
+            pos = attachedObject.bodyChunks[0].pos;
+            if (pullingObject) PullAttachedObject();
+        }
+
+        private void PullAttachedObject()
+        {
+            Vector2 dir = (baseChunk.pos - pos).normalized;
+            if (Custom.DistLess(baseChunk.pos, pos, 20f)) { pullingObject = false; return; }
+            for (int i = 0; i < attachedObject.bodyChunks.Length; i++)
+            {
+                BodyChunk chunk = attachedObject.bodyChunks[i];
+                chunk.vel += dir * (OBJECT_PULL_FORCE / Mathf.Max(chunk.mass, 0.5f));
+                if (chunk.vel.magnitude > 25f) chunk.vel = chunk.vel.normalized * 25f;
+            }
+        }
+
+        private bool TraceTerrainCollision(Vector2 from, Vector2 to, out Vector2 hitPoint, out Vector2 normal)
+        {
+            hitPoint = to;
+            normal = Vector2.zero;
+            if (Custom.DistLess(from, to, 0.1f)) return false;
+            IntVector2? hitTile = collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, from, to);
+            if (!hitTile.HasValue) return false;
+            FloatRect rect = player.room.TileRect(hitTile.Value);
+            Vector2 dir = to - from;
+            Vector2 invDir = new Vector2(1f / (Mathf.Abs(dir.x) < 0.0001f ? 0.0001f * Mathf.Sign(dir.x) : dir.x), 1f / (Mathf.Abs(dir.y) < 0.0001f ? 0.0001f * Mathf.Sign(dir.y) : dir.y));
+            float t1 = (rect.left - from.x) * invDir.x;
+            float t2 = (rect.right - from.x) * invDir.x;
+            float t3 = (rect.bottom - from.y) * invDir.y;
+            float t4 = (rect.top - from.y) * invDir.y;
+            float tMin = Mathf.Max(Mathf.Min(t1, t2), Mathf.Min(t3, t4));
+            float tMax = Mathf.Min(Mathf.Max(t1, t2), Mathf.Max(t3, t4));
+            if (tMax < 0 || tMin > tMax)
+            {
+                hitPoint.x = Mathf.Clamp(to.x, rect.left + 0.1f, rect.right - 0.1f);
+                hitPoint.y = Mathf.Clamp(to.y, rect.bottom + 0.1f, rect.top - 0.1f);
+                normal = (from - to).normalized;
                 return true;
             }
-
-            var bridges = SilkBridgeManager.GetBridgesInRoom(room);
-            foreach (var b in bridges)
-            {
-                if (b == null || b.room != room) continue;
-                var path = b.GetRenderPath();
-                for (int i = 0; i < path.Count - 1; i++)
-                {
-                    if (SilkBridgeManager.SegmentIntersection(from, to, path[i], path[i + 1], out Vector2 hit, out float _))
-                    {
-                        landingPoint = hit;
-                        bridge = b;
-                        return true;
-                    }
-                }
-            }
-
-            foreach (var objList in room.physicalObjects)
-            {
-                foreach (var item in objList)
-                {
-                    if (item is Player) continue;
-                    foreach (var chunk in item.bodyChunks)
-                    {
-                        if (Custom.DistLess(to, chunk.pos, chunk.rad + 5f))
-                        {
-                            landingPoint = chunk.pos;
-                            obj = item;
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            landingPoint = to;
+            hitPoint = from + dir * Mathf.Clamp01(tMin);
+            if (Mathf.Abs(hitPoint.x - rect.left) < 0.1f) normal = Vector2.left;
+            else if (Mathf.Abs(hitPoint.x - rect.right) < 0.1f) normal = Vector2.right;
+            else if (Mathf.Abs(hitPoint.y - rect.bottom) < 0.1f) normal = Vector2.down;
+            else normal = Vector2.up;
             return true;
         }
 
-        private static Vector2? GetPreciseTerrainCollisionForPreview(Room room, Vector2 from, Vector2 to)
+        private void RemoveUnnecessarySegments()
         {
-            IntVector2? firstSolid = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, to);
-            if (!firstSolid.HasValue) return null;
-            Vector2 start = from, end = to;
-            for (int i = 0; i < 10; i++)
+            for (int i = ropeSegmentPoints.Count - 1; i >= 0; i--)
             {
-                Vector2 mid = (start + end) * 0.5f;
-                IntVector2? hit = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, mid);
-                if (hit.HasValue) end = mid;
-                else start = mid;
+                if (segmentBridgeAttachments[i] != null || frameCounter - segmentLastChanged[i] < COOLDOWN_FRAMES) continue;
+                Vector2 prev = (i == 0) ? baseChunk.pos : ropeSegmentPoints[i - 1];
+                Vector2 next = (i == ropeSegmentPoints.Count - 1) ? pos : ropeSegmentPoints[i + 1];
+                if (!TraceTerrainCollision(prev, next, out _, out _) && !collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, prev, next, out _, out _, out _))
+                {
+                    ropeSegmentPoints.RemoveAt(i);
+                    segmentLastChanged.RemoveAt(i);
+                    segmentBridgeAttachments.RemoveAt(i);
+                }
             }
-            return end;
         }
+
+        private void AddNecessarySegments()
+        {
+            if (ropeSegmentPoints.Count > MAX_SEGMENTS) return;
+            for (int i = 0; i <= ropeSegmentPoints.Count; i++)
+            {
+                Vector2 start = (i == 0) ? baseChunk.pos : ropeSegmentPoints[i - 1];
+                Vector2 end = (i == ropeSegmentPoints.Count) ? pos : ropeSegmentPoints[i];
+                if (Custom.DistLess(start, end, 1f)) continue;
+                if (collisionProvider.RayTraceBridgesReturnFirstIntersection(player.room, start, end, out var bridge, out var hit, out _))
+                {
+                    var stable = bridge.GetClosestPoint(hit, out int seg, out float t);
+                    InsertSegment(i, stable, new SegmentBridgeInfo { bridge = bridge, segIndex = seg, t = t });
+                    return;
+                }
+                if (TraceTerrainCollision(start, end, out Vector2 hitP, out Vector2 normal))
+                {
+                    Vector2 offsetP = hitP + normal * WALL_OFFSET;
+                    if (!Custom.DistLess(offsetP, start, 3f) && !Custom.DistLess(offsetP, end, 3f))
+                    {
+                        InsertSegment(i, offsetP, null);
+                        return;
+                    }
+                }
+            }
+        }
+
+        private void InsertSegment(int index, Vector2 point, SegmentBridgeInfo bridgeInfo)
+        {
+            if (ropeSegmentPoints.Count >= MAX_SEGMENTS) return;
+            ropeSegmentPoints.Insert(Mathf.Clamp(index, 0, ropeSegmentPoints.Count), point);
+            segmentLastChanged.Insert(Mathf.Clamp(index, 0, segmentLastChanged.Count), frameCounter);
+            segmentBridgeAttachments.Insert(Mathf.Clamp(index, 0, segmentBridgeAttachments.Count), bridgeInfo);
+        }
+
+        private void SlideNodesOffObstacles()
+        {
+            for (int i = 0; i < ropeSegmentPoints.Count; i++)
+            {
+                if (segmentBridgeAttachments[i] != null || frameCounter - segmentLastChanged[i] < COOLDOWN_FRAMES) continue;
+                Vector2 point = ropeSegmentPoints[i];
+                IntVector2 tilePos = player.room.GetTilePosition(point);
+                if (player.room.GetTile(tilePos).Solid)
+                {
+                    FloatRect rect = player.room.TileRect(tilePos);
+                    Vector2 center = new Vector2(Mathf.Clamp(point.x, rect.left, rect.right), Mathf.Clamp(point.y, rect.bottom, rect.top));
+                    Vector2 dir = (point - center).normalized;
+                    if (dir.magnitude < 0.01f) dir = Vector2.up;
+                    if (Mathf.Abs(point.x - center.x) > Mathf.Abs(point.y - center.y))
+                        dir = new Vector2(Mathf.Sign(point.x - (rect.left + rect.right) * 0.5f), 0);
+                    else
+                        dir = new Vector2(0, Mathf.Sign(point.y - (rect.bottom + rect.top) * 0.5f));
+                    ropeSegmentPoints[i] += dir * 1f;
+                }
+            }
+        }
+        private class SegmentBridgeInfo { public SilkBridge bridge; public int segIndex; public float t; }
     }
 }

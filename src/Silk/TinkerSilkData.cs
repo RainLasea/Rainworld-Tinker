@@ -10,7 +10,11 @@ namespace tinker.Silk
         private static readonly ConditionalWeakTable<Player, SilkGraphics> graphicsTable = new();
         private static readonly Dictionary<Player, RoomCamera.SpriteLeaser> spriteLeasers = new();
 
-        public static SilkPhysics Get(Player player) => physicsTable.GetValue(player, p => new SilkPhysics(p));
+        public static SilkPhysics Get(Player player)
+        {
+            var silk = physicsTable.GetValue(player, p => new SilkPhysics(p));
+            return silk;
+        }
         public static SilkGraphics GetGraphics(Player player) => graphicsTable.GetValue(player, p => new SilkGraphics(p));
 
         public static void Initialize()

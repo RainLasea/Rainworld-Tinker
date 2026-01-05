@@ -22,7 +22,7 @@ namespace Tinker
         {
             orig(self, menu, owner, sceneID);
 
-            if (sceneID != TinkerSceneID)
+            if (sceneID != TinkerSceneID || !Options_Hook.LanguageHintEnabled)
                 return;
 
             var rw = menu.manager.rainWorld;

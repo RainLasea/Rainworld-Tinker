@@ -47,7 +47,7 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public void Update()
         {
-            if (!enabled) return;
+            if (!enabled || !Options_Hook.AntennaRenderEnabled) return;
             leftAntenna?.Update();
             rightAntenna?.Update();
             leftMiniAntenna?.Update();
@@ -65,7 +65,14 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
-            if (!enabled) return;
+            if (!enabled || !Options_Hook.AntennaRenderEnabled)
+            {
+                leftAntenna?.RemoveSprites();
+                rightAntenna?.RemoveSprites();
+                leftMiniAntenna?.RemoveSprites();
+                rightMiniAntenna?.RemoveSprites();
+                return;
+            }
             leftAntenna?.DrawSprites(sLeaser, rCam, timeStacker, camPos);
             rightAntenna?.DrawSprites(sLeaser, rCam, timeStacker, camPos);
             leftMiniAntenna?.DrawSprites(sLeaser, rCam, timeStacker, camPos);

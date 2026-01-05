@@ -1,7 +1,7 @@
 ﻿{
 	"id": "abysslasea.tinker",
 	"name": "The Tinker",
-	"version": "0.4.6",
+	"version": "0.5.0",
 	"authors": "AbyssLasea",
 	"description": "A lost follower...",
 	"requirements": [ "slime-cubed.slugbase","moreslugcats" ],
