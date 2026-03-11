@@ -9,7 +9,7 @@ namespace Tinker.Player_GrabUpdate
     [HarmonyPatch(typeof(Player), nameof(Player.GrabUpdate))]
     public static class EnableEatWhileHanging
     {
-        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, ILGenerator il)
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
             var codes = new List<CodeInstruction>(instructions);
             var distLessMethod = AccessTools.Method(typeof(RWCustom.Custom), nameof(RWCustom.Custom.DistLess), new[] { typeof(Vector2), typeof(Vector2), typeof(float) });
@@ -44,7 +44,30 @@ namespace Tinker.Player_GrabUpdate
                 }
             }
 
+            for (int i = 0; i < codes.Count; i++)
+            {
+                if (codes[i].opcode == OpCodes.Callvirt && codes[i].operand.ToString().Contains("BiteEdibleObject"))
+                {
+                    codes.Insert(i, new CodeInstruction(OpCodes.Ldarg_0));
+                    codes.Insert(i + 1, new CodeInstruction(OpCodes.Ldc_I4, 20));
+                    codes.Insert(i + 2, new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(EnableEatWhileHanging), nameof(PreventAutoBite))));
+                    break;
+                }
+            }
+
             return codes;
+        }
+
+        public static void PreventAutoBite(Player player, int resetValue)
+        {
+            bool isAttached = tinkerSilkData.Get(player).Attached;
+            if (isAttached && !player.input[0].pckp)
+            {
+                if (player.eatCounter < resetValue)
+                {
+                    player.eatCounter = resetValue;
+                }
+            }
         }
     }
 }

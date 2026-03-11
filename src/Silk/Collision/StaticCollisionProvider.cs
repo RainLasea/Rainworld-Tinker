@@ -2,6 +2,7 @@ using UnityEngine;
 using RWCustom;
 using Tinker.Silk.Bridge;
 using Tinker.Silk.Collision;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace Tinker.Silk.Collision
 {

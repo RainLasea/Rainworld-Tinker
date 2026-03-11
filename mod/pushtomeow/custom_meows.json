@@ -1,0 +1,11 @@
+{
+  "priority": 0,
+  "custom_meows": [
+    {
+      "slugcat_id": "tinker",
+      "short_meow_soundid": "SlugcatMeowTinkersShort",
+      "long_meow_soundid": "SlugcatMeowTinkers",
+      "volume_multiplier": 1.0
+    }
+  ]
+}

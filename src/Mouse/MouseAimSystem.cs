@@ -2,6 +2,7 @@
 using System.Reflection;
 using UnityEngine;
 using Tinker.Silk.Bridge;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Mouse
 {
@@ -77,7 +78,7 @@ namespace tinker.Mouse
             if (mouseAimEnabled && thrownBy is Player player && player == currentPlayer)
             {
                 bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
-                if (isTinker)
+                if (isTinker && currentCamera != null)
                 {
                     Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + currentCamera.pos.x, Futile.mousePosition.y + currentCamera.pos.y);
                     Vector2 aimVector = (mouseWorldPos - thrownPos).normalized;
@@ -97,24 +98,29 @@ namespace tinker.Mouse
         {
             Player.InputPackage inputPackage = orig(categoryID, playerNumber);
 
-            if (mouseAimEnabled && playerNumber == currentPlayerNumber && currentPlayer != null)
+            if (!mouseAimEnabled || playerNumber != currentPlayerNumber || currentPlayer == null)
             {
-                bool isTinker = currentPlayer.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !currentPlayer.isSlugpup;
-                if (!isTinker) return inputPackage;
+                return inputPackage;
+            }
 
-                bool inGame = RWCustom.Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
+            bool isTinker = currentPlayer.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !currentPlayer.isSlugpup;
+            if (!isTinker) return inputPackage;
 
-                bool isInBuildMode = false;
-                var bridgeState = SilkBridgeManager.GetBridgeModeState(currentPlayer);
-                if (bridgeState != null)
-                {
-                    isInBuildMode = bridgeState.active;
-                }
+            bool inGame = RWCustom.Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
 
-                if (inGame && Input.GetKey(KeyCode.E) && playerNumber == currentPlayerNumber)
+            bool isInBuildMode = false;
+            var bridgeState = SilkBridgeManager.GetBridgeModeState(currentPlayer);
+            if (bridgeState != null)
+            {
+                isInBuildMode = bridgeState.active;
+            }
+
+            if (inGame)
+            {
+                if (Input.GetKey(KeyCode.E))
                     inputPackage.pckp = true;
 
-                if (inGame && Input.GetMouseButton(0) && playerNumber == currentPlayerNumber && !isInBuildMode)
+                if (Input.GetMouseButton(0) && !isInBuildMode)
                 {
                     inputPackage.thrw = true;
                 }

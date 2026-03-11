@@ -3,8 +3,6 @@
 	"name": "The Tinker",
 	"description": "Though physically frail, it nimbly traverses the world with its unique abilities, <LINE> weaving a path to survival with wisdom in the gaps of the food chain.",
 	"features": {
-		"tinker/mouse_aiming": true,
-		"tinker/silk_enabled": true,
 		"color": "2b2b2b",
 
 		"guide_overseer": 1,

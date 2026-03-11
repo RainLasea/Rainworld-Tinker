@@ -468,318 +468,327 @@ namespace Tinker.Silk.Bridge
 
             return collisionPoint;
         }
-    }
 
-    public static class SilkBridgeManager
-    {
-        private static readonly Dictionary<Room, List<SilkBridge>> roomBridges = new Dictionary<Room, List<SilkBridge>>();
-        private static readonly ConditionalWeakTable<Player, BridgeModeState> playerBridgeStates = new ConditionalWeakTable<Player, BridgeModeState>();
-
-        public static void Initialize()
+        public static class SilkBridgeManager
         {
-            On.RainWorldGame.ShutDownProcess += RainWorldGame_ShutDownProcess;
-            On.Room.Loaded += Room_Loaded;
-            On.RoomCamera.Update += RoomCamera_Update;
-        }
+            private static readonly Dictionary<Room, List<SilkBridge>> roomBridges = new Dictionary<Room, List<SilkBridge>>();
+            private static readonly ConditionalWeakTable<Player, BridgeModeState> playerBridgeStates = new ConditionalWeakTable<Player, BridgeModeState>();
 
-        public static void Cleanup()
-        {
-            On.RainWorldGame.ShutDownProcess -= RainWorldGame_ShutDownProcess;
-            On.Room.Loaded -= Room_Loaded;
-            On.RoomCamera.Update -= RoomCamera_Update;
-            ClearAllBridges();
-        }
-
-        public static BridgeModeState GetBridgeModeState(Player player)
-        {
-            return player == null ? null : playerBridgeStates.GetValue(player, p => new BridgeModeState());
-        }
-
-        public static void CancelPlayerBuildMode(Player player)
-        {
-            tinkerSilkData.Get(player)?.DetachPhysicsOnly();
-            GetBridgeModeState(player)?.Deactivate();
-        }
-
-        public static void CreateBridge(Player player, Vector2 point1, Vector2 point2)
-        {
-            if (player?.room == null) return;
-
-            float straightDistance = Vector2.Distance(point1, point2);
-            if (straightDistance > 1200f) return;
-
-            int nodeCount = CalculateNodeCount(straightDistance);
-            float maxBridgeLength = straightDistance * 1.15f;
-
-            BridgeModeState bridgeState = GetBridgeModeState(player);
-
-            BridgeAnchor anchor1;
-            if (bridgeState?.d1AttachedObject != null)
+            public static void Initialize()
             {
-                anchor1 = BridgeAnchor.CreateObjectAnchor(bridgeState.d1AttachedObject, point1);
-            }
-            else if (bridgeState?.d1AttachedBridge != null)
-            {
-                anchor1 = BridgeAnchor.CreateBridgeAnchor(bridgeState.d1AttachedBridge, point1);
-            }
-            else
-            {
-                anchor1 = BridgeAnchor.CreateTerrainAnchor(point1);
+                On.RainWorldGame.ShutDownProcess += RainWorldGame_ShutDownProcess;
+                On.Room.Loaded += Room_Loaded;
+                On.RoomCamera.Update += RoomCamera_Update;
             }
 
-            BridgeAnchor anchor2;
-            if (bridgeState?.d2AttachedObject != null)
+            public static void Cleanup()
             {
-                anchor2 = BridgeAnchor.CreateObjectAnchor(bridgeState.d2AttachedObject, point2);
-            }
-            else if (bridgeState?.d2AttachedBridge != null)
-            {
-                anchor2 = BridgeAnchor.CreateBridgeAnchor(bridgeState.d2AttachedBridge, point2);
-            }
-            else
-            {
-                anchor2 = BridgeAnchor.CreateTerrainAnchor(point2);
+                On.RainWorldGame.ShutDownProcess -= RainWorldGame_ShutDownProcess;
+                On.Room.Loaded -= Room_Loaded;
+                On.RoomCamera.Update -= RoomCamera_Update;
+                ClearAllBridges();
             }
 
-            SilkBridge bridge = new SilkBridge(anchor1, anchor2, player.room, maxBridgeLength, nodeCount);
-
-            bridge.Update();
-
-            if (!roomBridges.ContainsKey(player.room))
-                roomBridges[player.room] = new List<SilkBridge>();
-
-            roomBridges[player.room].Add(bridge);
-            CancelPlayerBuildMode(player);
-        }
-
-        private static int CalculateNodeCount(float distance)
-        {
-            if (distance < 50f) return 3;
-            if (distance < 100f) return 5;
-            if (distance < 200f) return 8;
-            if (distance < 400f) return 12;
-            return 15;
-        }
-
-        public static List<SilkBridge> GetBridgesInRoom(Room room)
-        {
-            return room == null ? new List<SilkBridge>() :
-                   roomBridges.GetValueOrDefault(room, new List<SilkBridge>());
-        }
-
-        public static void ClearBridgesInRoom(Room room)
-        {
-            if (room != null && roomBridges.ContainsKey(room))
-                roomBridges[room].Clear();
-        }
-
-        public static void ClearAllBridges() => roomBridges.Clear();
-
-
-        public static SilkBridge GetClosestBridge(Room room, Vector2 pos, float range = 30f, System.Func<object, bool> value = null)
-        {
-            if (!roomBridges.ContainsKey(room)) return null;
-
-            SilkBridge closest = null;
-            float bestDist = range;
-
-            foreach (var bridge in roomBridges[room])
+            public static BridgeModeState GetBridgeModeState(Player player)
             {
-                if (!bridge.IsActive) continue;
+                return player == null ? null : playerBridgeStates.GetValue(player, p => new BridgeModeState());
+            }
 
-                int segIndex;
-                float t;
-                Vector2 closestPoint = bridge.GetClosestPoint(pos, out segIndex, out t);
-                float d = Vector2.Distance(closestPoint, pos);
+            public static void CancelPlayerBuildMode(Player player)
+            {
+                tinkerSilkData.Get(player)?.DetachPhysicsOnly();
+                GetBridgeModeState(player)?.Deactivate();
+            }
 
-                if (d < bestDist)
+            public static void CreateBridge(Player player, Vector2 point1, Vector2 point2)
+            {
+                if (player?.room == null) return;
+
+                float straightDistance = Vector2.Distance(point1, point2);
+
+                float cost = 5f + (straightDistance / 250f) * 10f;
+                cost = Mathf.Min(cost, 50f);
+
+                if (!tinkerSilkData.RequestEnergy(player, cost))
                 {
-                    bestDist = d;
-                    closest = bridge;
+                    CancelPlayerBuildMode(player);
+                    player.room.PlaySound(SoundID.HUD_Exit_Game, player.mainBodyChunk, false, 1f, 2f);
+                    return;
                 }
+                if (straightDistance > 1200f) return;
+
+                int nodeCount = CalculateNodeCount(straightDistance);
+                float maxBridgeLength = straightDistance * 1.15f;
+
+                BridgeModeState bridgeState = GetBridgeModeState(player);
+
+                BridgeAnchor anchor1;
+                if (bridgeState?.d1AttachedObject != null)
+                {
+                    anchor1 = BridgeAnchor.CreateObjectAnchor(bridgeState.d1AttachedObject, point1);
+                }
+                else if (bridgeState?.d1AttachedBridge != null)
+                {
+                    anchor1 = BridgeAnchor.CreateBridgeAnchor(bridgeState.d1AttachedBridge, point1);
+                }
+                else
+                {
+                    anchor1 = BridgeAnchor.CreateTerrainAnchor(point1);
+                }
+
+                BridgeAnchor anchor2;
+                if (bridgeState?.d2AttachedObject != null)
+                {
+                    anchor2 = BridgeAnchor.CreateObjectAnchor(bridgeState.d2AttachedObject, point2);
+                }
+                else if (bridgeState?.d2AttachedBridge != null)
+                {
+                    anchor2 = BridgeAnchor.CreateBridgeAnchor(bridgeState.d2AttachedBridge, point2);
+                }
+                else
+                {
+                    anchor2 = BridgeAnchor.CreateTerrainAnchor(point2);
+                }
+
+                SilkBridge bridge = new SilkBridge(anchor1, anchor2, player.room, maxBridgeLength, nodeCount);
+                bridge.Update();
+
+                if (!roomBridges.ContainsKey(player.room))
+                    roomBridges[player.room] = new List<SilkBridge>();
+
+                roomBridges[player.room].Add(bridge);
+                CancelPlayerBuildMode(player);
             }
 
-            return closest;
-        }
-
-        public static bool RayTraceBridgesReturnFirstIntersection(Room room, Vector2 A, Vector2 B,
-            out SilkBridge hitBridge, out Vector2 hitPoint, out float tOut)
-        {
-            return RayTraceBridgesInternal(room, A, B, null, out hitBridge, out hitPoint, out tOut);
-        }
-
-        public static bool RayTraceBridgesIgnoreSelf(Room room, Vector2 A, Vector2 B, Vector2 ignorePoint,
-            out SilkBridge hitBridge, out Vector2 hitPoint, out float tOut)
-        {
-            return RayTraceBridgesInternal(room, A, B, ignorePoint, out hitBridge, out hitPoint, out tOut);
-        }
-
-        private static bool RayTraceBridgesInternal(Room room, Vector2 A, Vector2 B, Vector2? ignorePoint,
-            out SilkBridge hitBridge, out Vector2 hitPoint, out float tOut)
-        {
-            hitBridge = null;
-            hitPoint = Vector2.zero;
-            tOut = 1f + 1e-6f;
-
-            if (room == null || !roomBridges.ContainsKey(room))
-                return false;
-
-            float bestT = 1f + 1e-6f;
-            SilkBridge bestBridge = null;
-            Vector2 bestPoint = Vector2.zero;
-
-            foreach (var bridge in roomBridges[room])
+            private static int CalculateNodeCount(float distance)
             {
-                if (ignorePoint.HasValue && IsPointOnBridge(bridge, ignorePoint.Value, 5f))
-                    continue;
+                if (distance < 50f) return 3;
+                if (distance < 100f) return 5;
+                if (distance < 200f) return 8;
+                if (distance < 400f) return 12;
+                return 15;
+            }
 
-                var path = bridge.GetRenderPath();
-                for (int i = 0; i < path.Count - 1; i++)
+            public static List<SilkBridge> GetBridgesInRoom(Room room)
+            {
+                return room == null ? new List<SilkBridge>() :
+                       roomBridges.GetValueOrDefault(room, new List<SilkBridge>());
+            }
+
+            public static void ClearBridgesInRoom(Room room)
+            {
+                if (room != null && roomBridges.ContainsKey(room))
+                    roomBridges[room].Clear();
+            }
+
+            public static void ClearAllBridges() => roomBridges.Clear();
+
+
+            public static SilkBridge GetClosestBridge(Room room, Vector2 pos, float range = 30f, System.Func<object, bool> value = null)
+            {
+                if (!roomBridges.ContainsKey(room)) return null;
+
+                SilkBridge closest = null;
+                float bestDist = range;
+
+                foreach (var bridge in roomBridges[room])
                 {
-                    if (SegmentIntersection(A, B, path[i], path[i + 1], out Vector2 inter, out float tOnAB) &&
-                        tOnAB >= 0f && tOnAB <= 1f && tOnAB < bestT)
+                    if (!bridge.IsActive) continue;
+
+                    int segIndex;
+                    float t;
+                    Vector2 closestPoint = bridge.GetClosestPoint(pos, out segIndex, out t);
+                    float d = Vector2.Distance(closestPoint, pos);
+
+                    if (d < bestDist)
                     {
-                        bestT = tOnAB;
-                        bestBridge = bridge;
-                        bestPoint = inter;
+                        bestDist = d;
+                        closest = bridge;
                     }
                 }
+
+                return closest;
             }
 
-            if (bestBridge != null)
+            public static bool RayTraceBridgesReturnFirstIntersection(Room room, Vector2 A, Vector2 B,
+                out SilkBridge hitBridge, out Vector2 hitPoint, out float tOut)
             {
-                hitBridge = bestBridge;
-                hitPoint = bestPoint;
-                tOut = bestT;
-                return true;
+                return RayTraceBridgesInternal(room, A, B, null, out hitBridge, out hitPoint, out tOut);
             }
 
-            return false;
-        }
-
-        private static bool IsPointOnBridge(SilkBridge bridge, Vector2 point, float tolerance = 5f)
-        {
-            var path = bridge.GetRenderPath();
-            for (int i = 0; i < path.Count - 1; i++)
+            public static bool RayTraceBridgesIgnoreSelf(Room room, Vector2 A, Vector2 B, Vector2 ignorePoint,
+                out SilkBridge hitBridge, out Vector2 hitPoint, out float tOut)
             {
-                if (DistanceToSegment(point, path[i], path[i + 1]) < tolerance)
+                return RayTraceBridgesInternal(room, A, B, ignorePoint, out hitBridge, out hitPoint, out tOut);
+            }
+
+            private static bool RayTraceBridgesInternal(Room room, Vector2 A, Vector2 B, Vector2? ignorePoint,
+                out SilkBridge hitBridge, out Vector2 hitPoint, out float tOut)
+            {
+                hitBridge = null;
+                hitPoint = Vector2.zero;
+                tOut = 1f + 1e-6f;
+
+                if (room == null || !roomBridges.ContainsKey(room))
+                    return false;
+
+                float bestT = 1f + 1e-6f;
+                SilkBridge bestBridge = null;
+                Vector2 bestPoint = Vector2.zero;
+
+                foreach (var bridge in roomBridges[room])
+                {
+                    if (ignorePoint.HasValue && IsPointOnBridge(bridge, ignorePoint.Value, 5f))
+                        continue;
+
+                    var path = bridge.GetRenderPath();
+                    for (int i = 0; i < path.Count - 1; i++)
+                    {
+                        if (SegmentIntersection(A, B, path[i], path[i + 1], out Vector2 inter, out float tOnAB) &&
+                            tOnAB >= 0f && tOnAB <= 1f && tOnAB < bestT)
+                        {
+                            bestT = tOnAB;
+                            bestBridge = bridge;
+                            bestPoint = inter;
+                        }
+                    }
+                }
+
+                if (bestBridge != null)
+                {
+                    hitBridge = bestBridge;
+                    hitPoint = bestPoint;
+                    tOut = bestT;
                     return true;
-            }
-            return false;
-        }
-
-        private static float DistanceToSegment(Vector2 point, Vector2 segStart, Vector2 segEnd)
-        {
-            Vector2 line = segEnd - segStart;
-            float len = line.magnitude;
-            if (len < 0.01f) return Vector2.Distance(point, segStart);
-
-            float t = Mathf.Clamp01(Vector2.Dot(point - segStart, line) / (len * len));
-            Vector2 projection = segStart + t * line;
-            return Vector2.Distance(point, projection);
-        }
-
-        public static bool SegmentIntersection(Vector2 p, Vector2 p2, Vector2 q, Vector2 q2,
-            out Vector2 intersection, out float tOnAB)
-        {
-            intersection = Vector2.zero;
-            tOnAB = 0f;
-
-            Vector2 r = p2 - p;
-            Vector2 s = q2 - q;
-            float rxs = Cross(r, s);
-
-            if (Mathf.Abs(rxs) < 1e-6f) return false;
-
-            float t = Cross(q - p, s) / rxs;
-            float u = Cross(q - p, r) / rxs;
-
-            if (t >= 0f && t <= 1f && u >= 0f && u <= 1f)
-            {
-                intersection = p + t * r;
-                tOnAB = t;
-                return true;
-            }
-
-            return false;
-        }
-
-        private static float Cross(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
-
-        private static void RainWorldGame_ShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame self)
-        {
-            ClearAllBridges();
-            orig(self);
-        }
-
-        private static void Room_Loaded(On.Room.orig_Loaded orig, Room self)
-        {
-            orig(self);
-            if (!roomBridges.ContainsKey(self))
-                roomBridges[self] = new List<SilkBridge>();
-        }
-
-        private static void RoomCamera_Update(On.RoomCamera.orig_Update orig, RoomCamera self)
-        {
-            orig(self);
-            if (self.room == null) return;
-
-            if (roomBridges.ContainsKey(self.room))
-            {
-                var bridges = roomBridges[self.room];
-                for (int i = bridges.Count - 1; i >= 0; i--)
-                {
-                    var bridge = bridges[i];
-                    bridge.Update();
-                    if (bridge.slatedForDeletetion)
-                    {
-                        bridges.RemoveAt(i);
-                    }
                 }
+
+                return false;
             }
 
-            foreach (var player in self.room.game.Players)
-            {
-                if (player?.realizedCreature is Player p)
-                {
-                    var bridgeState = GetBridgeModeState(p);
-
-                    if (bridgeState?.active == true)
-                    {
-                        bridgeState.UpdateD2Position(p.room);
-                    }
-
-                    if (bridgeState?.virtualSilkActive == true || bridgeState?.animating == true)
-                        bridgeState.UpdateVirtualSilk(p);
-                }
-            }
-        }
-
-        public static bool IsSilkAt(Room room, int x, int y, out bool isVertical)
-        {
-            foreach (var bridge in GetBridgesInRoom(room))
+            private static bool IsPointOnBridge(SilkBridge bridge, Vector2 point, float tolerance = 5f)
             {
                 var path = bridge.GetRenderPath();
                 for (int i = 0; i < path.Count - 1; i++)
                 {
-                    Vector2 a = path[i], b = path[i + 1];
-
-                    if (PointNearSegment(new Vector2(x + 0.5f, y + 0.5f) * 20f, a, b, 8f))
-                    {
-                        isVertical = Mathf.Abs(a.y - b.y) > Mathf.Abs(a.x - b.x);
+                    if (DistanceToSegment(point, path[i], path[i + 1]) < tolerance)
                         return true;
+                }
+                return false;
+            }
+
+            private static float DistanceToSegment(Vector2 point, Vector2 segStart, Vector2 segEnd)
+            {
+                Vector2 line = segEnd - segStart;
+                float len = line.magnitude;
+                if (len < 0.01f) return Vector2.Distance(point, segStart);
+
+                float t = Mathf.Clamp01(Vector2.Dot(point - segStart, line) / (len * len));
+                Vector2 projection = segStart + t * line;
+                return Vector2.Distance(point, projection);
+            }
+
+            public static bool SegmentIntersection(Vector2 p, Vector2 p2, Vector2 q, Vector2 q2,
+                out Vector2 intersection, out float tOnAB)
+            {
+                intersection = Vector2.zero;
+                tOnAB = 0f;
+
+                Vector2 r = p2 - p;
+                Vector2 s = q2 - q;
+                float rxs = Cross(r, s);
+
+                if (Mathf.Abs(rxs) < 1e-6f) return false;
+
+                float t = Cross(q - p, s) / rxs;
+                float u = Cross(q - p, r) / rxs;
+
+                if (t >= 0f && t <= 1f && u >= 0f && u <= 1f)
+                {
+                    intersection = p + t * r;
+                    tOnAB = t;
+                    return true;
+                }
+
+                return false;
+            }
+
+            private static float Cross(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
+
+            private static void RainWorldGame_ShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame self)
+            {
+                ClearAllBridges();
+                orig(self);
+            }
+
+            private static void Room_Loaded(On.Room.orig_Loaded orig, Room self)
+            {
+                orig(self);
+                if (!roomBridges.ContainsKey(self))
+                    roomBridges[self] = new List<SilkBridge>();
+            }
+
+            private static void RoomCamera_Update(On.RoomCamera.orig_Update orig, RoomCamera self)
+            {
+                orig(self);
+                if (self.room == null) return;
+
+                if (roomBridges.ContainsKey(self.room))
+                {
+                    var bridges = roomBridges[self.room];
+                    for (int i = bridges.Count - 1; i >= 0; i--)
+                    {
+                        var bridge = bridges[i];
+                        bridge.Update();
+                        if (bridge.slatedForDeletetion)
+                        {
+                            bridges.RemoveAt(i);
+                        }
+                    }
+                }
+
+                foreach (var player in self.room.game.Players)
+                {
+                    if (player?.realizedCreature is Player p)
+                    {
+                        var bridgeState = GetBridgeModeState(p);
+
+                        if (bridgeState?.active == true)
+                        {
+                            bridgeState.UpdateD2Position(p.room);
+                        }
+
+                        if (bridgeState?.virtualSilkActive == true || bridgeState?.animating == true)
+                            bridgeState.UpdateVirtualSilk(p);
                     }
                 }
             }
-            isVertical = false;
-            return false;
-        }
 
-        private static bool PointNearSegment(Vector2 p, Vector2 a, Vector2 b, float threshold)
-        {
-            float t = Mathf.Clamp01(Vector2.Dot(p - a, b - a) / (b - a).sqrMagnitude);
-            Vector2 proj = a + (b - a) * t;
-            return Vector2.Distance(p, proj) < threshold;
+            public static bool IsSilkAt(Room room, int x, int y, out bool isVertical)
+            {
+                foreach (var bridge in GetBridgesInRoom(room))
+                {
+                    var path = bridge.GetRenderPath();
+                    for (int i = 0; i < path.Count - 1; i++)
+                    {
+                        Vector2 a = path[i], b = path[i + 1];
+
+                        if (PointNearSegment(new Vector2(x + 0.5f, y + 0.5f) * 20f, a, b, 8f))
+                        {
+                            isVertical = Mathf.Abs(a.y - b.y) > Mathf.Abs(a.x - b.x);
+                            return true;
+                        }
+                    }
+                }
+                isVertical = false;
+                return false;
+            }
+
+            private static bool PointNearSegment(Vector2 p, Vector2 a, Vector2 b, float threshold)
+            {
+                float t = Mathf.Clamp01(Vector2.Dot(p - a, b - a) / (b - a).sqrMagnitude);
+                Vector2 proj = a + (b - a) * t;
+                return Vector2.Distance(p, proj) < threshold;
+            }
         }
     }
 }

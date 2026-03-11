@@ -1,0 +1,2 @@
+[ADD]SlugcatMeowTinkers/dopplerFac=0/rangeFac=1 : TinkersLongMeows/vol=0.7/maxPitch=1.1/minPitch=0.9
+[ADD]SlugcatMeowTinkersShort/dopplerFac=0/rangeFac=1 : TinkersShortMeows/vol=0.7/maxPitch=1.1/minPitch=0.9

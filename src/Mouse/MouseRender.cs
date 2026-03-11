@@ -1,6 +1,7 @@
 ﻿using RWCustom;
 using UnityEngine;
 using Tinker.Silk.Bridge;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Mouse
 {
@@ -43,10 +44,10 @@ namespace tinker.Mouse
 
         private static void CreateCursorSprites(FContainer container)
         {
-            cursorSprite = new FSprite("Futile_White")
+            cursorSprite = new FSprite("Mouse")
             {
                 color = Color.white,
-                scale = 0.4f,
+                scale = 1f,
                 anchorX = 0.5f,
                 anchorY = 0.5f,
                 alpha = 1f,
@@ -118,8 +119,8 @@ namespace tinker.Mouse
                 cursorSprite.x = mousePos.x;
                 cursorSprite.y = mousePos.y;
                 cursorSprite.alpha = 0.5f;
-                cursorSprite.color = new Color(1f, 1f, 1f, 0.5f);
-                cursorSprite.scale = 0.35f;
+                cursorSprite.color = Color.white;
+                cursorSprite.scale = 0.8f;
                 cursorSprite.isVisible = true;
 
                 var cam = MouseAimSystem.GetCurrentCamera();
@@ -144,7 +145,7 @@ namespace tinker.Mouse
                 cursorSprite.y = mousePos.y;
                 cursorSprite.alpha = 1f;
                 cursorSprite.color = Color.white;
-                cursorSprite.scale = 0.4f;
+                cursorSprite.scale = 1f;
                 cursorSprite.isVisible = true;
                 bridgeAnchorSprite.isVisible = false;
                 targetPreviewSprite.isVisible = false;

@@ -1,0 +1,28 @@
+{"frames": {
+
+"Silkhud.png":
+{
+	"frame": {"x":0,"y":0,"w":14,"h":46},
+	"rotated": false,
+	"trimmed": false,
+	"spriteSourceSize": {"x":0,"y":0,"w":14,"h":46},
+	"sourceSize": {"w":14,"h":46}
+},
+"Silkhud_0.png":
+{
+	"frame": {"x":0,"y":46,"w":14,"h":46},
+	"rotated": false,
+	"trimmed": false,
+	"spriteSourceSize": {"x":0,"y":0,"w":14,"h":46},
+	"sourceSize": {"w":14,"h":46}
+}},
+"meta": {
+	"app": "https://www.codeandweb.com/texturepacker",
+	"version": "1.0",
+	"image": "silkhud.png",
+	"format": "RGBA8888",
+	"size": {"w":14,"h":92},
+	"scale": "1",
+	"smartupdate": "$TexturePacker:SmartUpdate:0c3ac815963775484f59e86f07326460:0a691d7e07d0e66b9360d1f7e67c9fa6:68f2351e73c24f5dd5ab9ff560946ee5$"
+}
+}

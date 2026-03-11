@@ -143,6 +143,15 @@ namespace Tinker.Silk.Bridge
         }
     }
 
+    public class AttachedObjectInfo
+    {
+        public PhysicalObject obj;
+        public int attachedNodeIndex;
+        public Vector2 localOffset;
+        public float attachTime;
+        public bool isPlayerDetachable = true;
+    }
+
     public class SilkBridge : IClimbableSilk
     {
 
@@ -157,6 +166,12 @@ namespace Tinker.Silk.Bridge
         private List<BridgeNode> physicsNodes;
         public Vector2[] RenderPoints { get; private set; }
 
+        private List<AttachedObjectInfo> attachedObjects = new List<AttachedObjectInfo>();
+        private const float OBJECT_ATTACH_DISTANCE = 15f;
+        private const float OBJECT_DETACH_DISTANCE = 20f;
+        private const float OBJECT_ATTACH_FORCE = 0.3f;
+        private const float OBJECT_MASS_INFLUENCE = 0.05f;
+
         private const float NODE_MASS = 0.1f;
         private const float GRAVITY = 0.1f;
         private const float DAMPING = 0.975f;
@@ -165,16 +180,20 @@ namespace Tinker.Silk.Bridge
 
         public SilkBridge(BridgeAnchor start, BridgeAnchor end, Room room, float maxLength, int nodeCount = 15)
         {
-            startAnchor = start;
-            endAnchor = end;
+            this.startAnchor = start;
+            this.endAnchor = end;
             this.room = room;
-            maxBridgeLength = maxLength;
+            this.maxBridgeLength = maxLength;
             this.nodeCount = nodeCount;
             this.slatedForDeletetion = false;
             this.health = INITIAL_HEALTH;
 
+            Vector2 sPos = startAnchor.GetWorldPosition();
+            Vector2 ePos = endAnchor.GetWorldPosition();
+            
             InitializePhysicsNodes();
-            RenderPoints = new Vector2[nodeCount + 2];
+            
+            RenderPoints = new Vector2[nodeCount];
         }
 
 
@@ -197,9 +216,16 @@ namespace Tinker.Silk.Bridge
 
             for (int i = 0; i < nodeCount; i++)
             {
-                float t = (i + 1f) / (nodeCount + 1f);
-                Vector2 pos = Vector2.Lerp(start, end, t);
-                physicsNodes.Add(new BridgeNode(pos));
+                float t = (nodeCount <= 1) ? 0.5f : (float)i / (nodeCount - 1);
+                Vector2 initialPos = Vector2.Lerp(start, end, t);
+
+                BridgeNode newNode = new BridgeNode(initialPos);
+
+                if (i > 0 && i < nodeCount - 1 && Vector2.Distance(start, end) > 10f)
+                {
+                    newNode.pos += Custom.RNV() * 5f;
+                }
+                physicsNodes.Add(newNode);
             }
         }
 
@@ -207,40 +233,66 @@ namespace Tinker.Silk.Bridge
         {
             if (room == null || slatedForDeletetion) return;
 
-
             if (!startAnchor.IsValid(room) || !endAnchor.IsValid(room) || health <= 0f)
             {
                 if (health <= 0f && !slatedForDeletetion)
                 {
-                    // 确保只触发一次
                     slatedForDeletetion = true;
-                    // 默认在中间断裂
                     Vector2 breakPoint = GetPointOnSegment(SegmentCount / 2, 0.5f);
+                    ReleaseAllAttachedObjects();
                     BrokenSilkManager.TriggerBreakAnimation(GetRenderPath(), room, breakPoint);
                 }
                 else
                 {
                     slatedForDeletetion = true;
+                    ReleaseAllAttachedObjects();
                 }
                 return;
             }
 
+            physicsNodes[0].pos = startAnchor.GetWorldPosition();
+            physicsNodes[0].lastPos = physicsNodes[0].pos;
+            physicsNodes[0].isFixed = true;
 
-            foreach (var node in physicsNodes)
+            physicsNodes[physicsNodes.Count - 1].pos = endAnchor.GetWorldPosition();
+            physicsNodes[physicsNodes.Count - 1].lastPos = physicsNodes[physicsNodes.Count - 1].pos;
+            physicsNodes[physicsNodes.Count - 1].isFixed = true;
+
+            float gravity = 0.6f;
+            float friction = 0.95f;
+            for (int i = 0; i < physicsNodes.Count; i++)
             {
-                node.lastPos = node.pos;
-                node.vel.y -= GRAVITY;
-                node.pos += node.vel;
-                node.vel *= DAMPING;
+                if (physicsNodes[i].isFixed) continue;
+
+                Vector2 vel = (physicsNodes[i].pos - physicsNodes[i].lastPos) * friction;
+                physicsNodes[i].lastPos = physicsNodes[i].pos;
+                physicsNodes[i].pos += vel;
+                physicsNodes[i].pos.y -= gravity;
             }
+            CheckAndAttachNearbyObjects();
 
+            int iterations = 10;
+            float segmentLength = (Vector2.Distance(physicsNodes[0].pos, physicsNodes[physicsNodes.Count - 1].pos) / (physicsNodes.Count - 1)) * 0.85f;
 
-            for (int iteration = 0; iteration < 8; iteration++)
+            for (int n = 0; n < iterations; n++)
             {
-                ApplyDistanceConstraints();
+                for (int i = 0; i < physicsNodes.Count - 1; i++)
+                {
+                    var a = physicsNodes[i];
+                    var b = physicsNodes[i + 1];
+                    float d = Vector2.Distance(a.pos, b.pos);
+                    if (d < 0.1f) continue;
+
+                    float difference = (segmentLength - d) / d;
+                    Vector2 offset = (a.pos - b.pos) * difference * 0.5f;
+
+                    if (!a.isFixed) a.pos += offset;
+                    if (!b.isFixed) b.pos -= offset;
+                }
+
                 ApplyTerrainCollision();
+                UpdateAttachedObjects();
             }
-
             UpdateRenderPoints();
         }
 
@@ -302,14 +354,154 @@ namespace Tinker.Silk.Bridge
             }
         }
 
+        public void CheckAndAttachNearbyObjects()
+        {
+            if (room == null || !IsActive) return;
+
+            for (int i = 0; i < room.physicalObjects.Length; i++)
+            {
+                foreach (PhysicalObject obj in room.physicalObjects[i])
+                {
+                    if (obj is Weapon || obj.slatedForDeletetion || obj is Player) continue;
+
+                    if (IsObjectAttached(obj)) continue;
+
+                    foreach (BodyChunk chunk in obj.bodyChunks)
+                    {
+                        int closestNode = -1;
+                        float closestDist = float.MaxValue;
+
+                        for (int nodeIdx = 0; nodeIdx < physicsNodes.Count; nodeIdx++)
+                        {
+                            float dist = Vector2.Distance(chunk.pos, physicsNodes[nodeIdx].pos);
+                            if (dist < closestDist && dist < OBJECT_ATTACH_DISTANCE)
+                            {
+                                closestDist = dist;
+                                closestNode = nodeIdx;
+                            }
+                        }
+
+                        if (closestNode >= 0 && chunk.vel.magnitude < 5f)
+                        {
+                            AttachedObjectInfo info = new AttachedObjectInfo
+                            {
+                                obj = obj,
+                                attachedNodeIndex = closestNode,
+                                localOffset = chunk.pos - physicsNodes[closestNode].pos,
+                                attachTime = Time.time
+                            };
+
+                            attachedObjects.Add(info);
+
+                            chunk.vel *= 0.3f;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        public void UpdateAttachedObjects()
+        {
+            for (int i = attachedObjects.Count - 1; i >= 0; i--)
+            {
+                AttachedObjectInfo info = attachedObjects[i];
+
+                if (info.obj == null || info.obj.slatedForDeletetion)
+                {
+                    attachedObjects.RemoveAt(i);
+                    continue;
+                }
+
+                if (info.obj.room != room)
+                {
+                    attachedObjects.RemoveAt(i);
+                    continue;
+                }
+
+                if (info.attachedNodeIndex >= 0 && info.attachedNodeIndex < physicsNodes.Count)
+                {
+                    BridgeNode node = physicsNodes[info.attachedNodeIndex];
+                    BodyChunk primaryChunk = info.obj.bodyChunks[0];
+
+                    Vector2 targetPos = node.pos + info.localOffset;
+
+                    primaryChunk.pos = Vector2.Lerp(primaryChunk.pos, targetPos, OBJECT_ATTACH_FORCE);
+                    primaryChunk.vel *= 0.7f;
+
+                    if (info.obj.bodyChunks.Length > 1)
+                    {
+                        Vector2 offset = targetPos - primaryChunk.lastPos;
+                        for (int j = 1; j < info.obj.bodyChunks.Length; j++)
+                        {
+                            info.obj.bodyChunks[j].pos += offset * 0.5f;
+                        }
+                    }
+
+                    if (!node.isFixed)
+                    {
+                        float weightFactor = Mathf.Clamp(info.obj.TotalMass * OBJECT_MASS_INFLUENCE, 0.1f, 1f);
+                        Vector2 pullForce = Vector2.down * weightFactor;
+                        node.vel += pullForce;
+                    }
+                }
+            }
+        }
+
+        public bool TryDetachObject(Player player, out PhysicalObject detachedObject)
+        {
+            detachedObject = null;
+
+            foreach (AttachedObjectInfo info in attachedObjects)
+            {
+                if (info.obj == null || !info.isPlayerDetachable) continue;
+
+                float distToPlayer = Vector2.Distance(player.bodyChunks[0].pos, info.obj.bodyChunks[0].pos);
+                if (distToPlayer < OBJECT_DETACH_DISTANCE)
+                {
+                    detachedObject = info.obj;
+                    attachedObjects.Remove(info);
+
+                    Vector2 pushDir = (info.obj.bodyChunks[0].pos - player.bodyChunks[0].pos).normalized;
+                    info.obj.bodyChunks[0].vel += pushDir * 3f;
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public bool IsObjectAttached(PhysicalObject obj)
+        {
+            foreach (AttachedObjectInfo info in attachedObjects)
+            {
+                if (info.obj == obj) return true;
+            }
+            return false;
+        }
+
+        private void ReleaseAllAttachedObjects()
+        {
+            foreach (AttachedObjectInfo info in attachedObjects)
+            {
+                if (info.obj != null && info.obj.bodyChunks != null)
+                {
+                    Vector2 randomDir = Custom.RNV() * Random.value * 2f;
+                    info.obj.bodyChunks[0].vel += randomDir + Vector2.down * 1f;
+                }
+            }
+            attachedObjects.Clear();
+        }
+
         private void UpdateRenderPoints()
         {
-            RenderPoints[0] = startPoint;
+            if (physicsNodes == null || RenderPoints == null) return;
 
             for (int i = 0; i < physicsNodes.Count; i++)
-                RenderPoints[i + 1] = physicsNodes[i].pos;
-
-            RenderPoints[nodeCount + 1] = endPoint;
+            {
+                RenderPoints[i] = physicsNodes[i].pos;
+            }
         }
 
         public List<Vector2> GetRenderPath() => new List<Vector2>(RenderPoints);
@@ -348,43 +540,37 @@ namespace Tinker.Silk.Bridge
             return bestPoint;
         }
 
-        public void ApplyForceAt(Vector2 worldPos, Vector2 force, float radius = 24f)
+        public void ApplyForceAt(Vector2 worldPos, Vector2 force, float radius)
         {
-            if (physicsNodes == null || physicsNodes.Count == 0) return;
+            if (physicsNodes == null) return;
 
-            int segIndex;
-            float t;
-            Vector2 hitPoint = GetClosestPoint(worldPos, out segIndex, out t);
-
-            int leftNode = Mathf.Clamp(segIndex - 1, 0, physicsNodes.Count - 1);
-            int rightNode = Mathf.Clamp(segIndex, 0, physicsNodes.Count - 1);
-
-            if (segIndex == 0) leftNode = 0;
-            if (segIndex >= physicsNodes.Count) rightNode = physicsNodes.Count - 1;
-
-            float leftDist = Vector2.Distance(hitPoint, physicsNodes[leftNode].pos);
-            float rightDist = Vector2.Distance(hitPoint, physicsNodes[rightNode].pos);
-            float total = leftDist + rightDist;
-            float leftWeight = total > 1e-6f ? 1f - leftDist / total : 0.5f;
-            float rightWeight = total > 1e-6f ? 1f - rightDist / total : 0.5f;
-
-            float forceScale = 0.03f;
-
-            if (leftNode >= 0 && leftNode < physicsNodes.Count)
-                physicsNodes[leftNode].vel += force * (leftWeight * forceScale / NODE_MASS);
-
-            if (rightNode >= 0 && rightNode < physicsNodes.Count)
-                physicsNodes[rightNode].vel += force * (rightWeight * forceScale / NODE_MASS);
-
-            int spread = 2;
-            for (int s = 1; s <= spread; s++)
+            for (int i = 0; i < physicsNodes.Count; i++)
             {
-                float atten = 1f / (1f + s * 2f);
-                int ln = leftNode - s;
-                int rn = rightNode + s;
+                float dist = Vector2.Distance(worldPos, physicsNodes[i].pos);
+                if (dist < radius)
+                {
+                    physicsNodes[i].pos += force * 0.2f;
+                }
+            }
+        }
 
-                if (ln >= 0) physicsNodes[ln].vel += force * (0.25f * atten * forceScale / NODE_MASS);
-                if (rn < physicsNodes.Count) physicsNodes[rn].vel += force * (0.25f * atten * forceScale / NODE_MASS);
+        private void TryShakeOffObjects(Vector2 impactPoint, Vector2 force)
+        {
+            for (int i = attachedObjects.Count - 1; i >= 0; i--)
+            {
+                AttachedObjectInfo info = attachedObjects[i];
+                if (info.obj == null) continue;
+
+                float dist = Vector2.Distance(impactPoint, info.obj.bodyChunks[0].pos);
+                float shakeChance = Mathf.InverseLerp(50f, 10f, dist) * (force.magnitude / 15f);
+
+                if (Random.value < shakeChance)
+                {
+                    Vector2 randomDir = Custom.RNV() * Random.value * 2f;
+                    info.obj.bodyChunks[0].vel += randomDir + Vector2.down * 1f;
+
+                    attachedObjects.RemoveAt(i);
+                }
             }
         }
 
@@ -395,6 +581,7 @@ namespace Tinker.Silk.Bridge
             if (health <= 0)
             {
                 slatedForDeletetion = true;
+                ReleaseAllAttachedObjects();
                 BrokenSilkManager.TriggerBreakAnimation(GetRenderPath(), room, impactPoint);
                 room?.PlaySound(SoundID.Spear_Stick_In_Wall, startPoint, 0.8f, 1.2f);
                 room?.PlaySound(SoundID.Spear_Stick_In_Wall, endPoint, 0.8f, 1.2f);
@@ -457,12 +644,23 @@ namespace Tinker.Silk.Bridge
             public Vector2 pos;
             public Vector2 lastPos;
             public Vector2 vel;
+            public bool isFixed;
 
             public BridgeNode(Vector2 position)
             {
-                pos = position;
-                lastPos = position;
-                vel = Vector2.zero;
+                this.pos = position;
+                this.lastPos = position;
+                this.isFixed = false;
+            }
+
+            public void Update(float gravity, float friction)
+            {
+                if (isFixed) return;
+
+                Vector2 vel = (pos - lastPos) * friction;
+                lastPos = pos;
+                pos += vel;
+                pos.y -= gravity;
             }
         }
     }

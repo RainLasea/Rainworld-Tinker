@@ -23,12 +23,22 @@ namespace tinker.shaders
         private static void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
         {
             orig(self, eu);
-            if (self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup)
+
+            if (self == null || self.room == null || self.room.world == null) return;
+
+            if (self.slugcatStats.name == Plugin.SlugName && !self.isSlugpup)
             {
-                if (Options_Hook.NightVisionEnabled && self.room != null && self.room.world.region.name == "SH")
+                bool isStory = self.room.game.IsStorySession;
+                bool inRegion = self.room.world.region != null && self.room.world.region.name == "SH";
+
+                if (isStory && Options_Hook.NightVisionEnabled && inRegion)
+                {
                     nvIntensity = Mathf.Min(1f, nvIntensity + 0.015f);
+                }
                 else
+                {
                     nvIntensity = Mathf.Max(0f, nvIntensity - 0.015f);
+                }
             }
         }
 

@@ -1,6 +1,7 @@
 ﻿using RWCustom;
 using System.Collections.Generic;
 using UnityEngine;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace Tinker.Silk.Bridge
 {
@@ -15,7 +16,6 @@ namespace Tinker.Silk.Bridge
             On.Room.Update += Room_Update;
             On.RoomCamera.DrawUpdate += RoomCamera_DrawUpdate;
             On.Room.Unloaded += Room_Unloaded;
-            On.Room.Update += Room_WeaponSilkCheck;
             On.Creature.Update += Creature_Update;
             initialized = true;
         }
@@ -26,7 +26,6 @@ namespace Tinker.Silk.Bridge
             On.Room.Update -= Room_Update;
             On.RoomCamera.DrawUpdate -= RoomCamera_DrawUpdate;
             On.Room.Unloaded -= Room_Unloaded;
-            On.Room.Update -= Room_WeaponSilkCheck;
             On.Creature.Update -= Creature_Update;
 
             foreach (var anim in animations)
@@ -69,27 +68,14 @@ namespace Tinker.Silk.Bridge
                         if (SilkBridgeManager.SegmentIntersection(chunk.lastPos, chunk.pos, segStart, segEnd, out Vector2 intersection, out _))
                         {
                             Vector2 moveDir = (chunk.pos - chunk.lastPos).normalized;
-                            Vector2 segDir = (segEnd - segStart).normalized;
-                            Vector2 normal = Custom.PerpendicularVector(segDir);
-
-                            if (Vector2.Dot(normal, moveDir) < 0)
-                            {
-                                normal = -normal;
-                            }
-
-                            chunk.pos = intersection - moveDir * (chunk.rad * 0.5f + 1f);
-
                             float impactSpeed = chunk.vel.magnitude;
-                            chunk.vel = Vector2.Reflect(chunk.vel, normal) * 0.3f;
-
                             float damage = impactSpeed * chunk.mass * 0.6f;
-                            bridge.TakeDamage(damage, intersection);
 
+                            bridge.TakeDamage(damage, intersection);
                             Vector2 forceOnBridge = moveDir * impactSpeed * chunk.mass * 1.5f;
-                            bridge.ApplyForceAt(intersection, forceOnBridge);
+                            bridge.ApplyForceAt(intersection, forceOnBridge, 30f);
 
                             self.room.PlaySound(SoundID.Big_Needle_Worm_Impale_Terrain, chunk.pos, 0.1f, 1.5f);
-
                             goto next_creature_loop;
                         }
                     }
@@ -101,6 +87,7 @@ namespace Tinker.Silk.Bridge
         private static void Room_Update(On.Room.orig_Update orig, Room self)
         {
             orig(self);
+
             for (int i = animations.Count - 1; i >= 0; i--)
             {
                 var anim = animations[i];
@@ -111,6 +98,44 @@ namespace Tinker.Silk.Bridge
                 {
                     anim.Destroy();
                     animations.RemoveAt(i);
+                }
+            }
+
+            Room_WeaponSilkCheck(self);
+        }
+
+        private static void Room_WeaponSilkCheck(Room self)
+        {
+            var bridges = SilkBridgeManager.GetBridgesInRoom(self);
+            if (bridges == null || bridges.Count == 0) return;
+
+            foreach (var obj in self.physicalObjects)
+            {
+                foreach (var phys in obj)
+                {
+                    if (phys is Weapon weapon && !weapon.slatedForDeletetion)
+                    {
+                        if (weapon.thrownBy == null || weapon.mode != Weapon.Mode.Thrown) continue;
+
+                        var chunk = weapon.firstChunk;
+                        foreach (var bridge in bridges)
+                        {
+                            if (!bridge.IsActive) continue;
+                            var path = bridge.GetRenderPath();
+                            if (path.Count < 2) continue;
+
+                            for (int i = 0; i < path.Count - 1; i++)
+                            {
+                                if (SilkBridgeManager.SegmentIntersection(chunk.lastPos, chunk.pos, path[i], path[i + 1], out Vector2 intersection, out _))
+                                {
+                                    bridge.TakeDamage(bridge.health + 1f, intersection);
+                                    TriggerBreakAnimation(path, self, intersection);
+                                    goto next_weapon;
+                                }
+                            }
+                        }
+                    }
+                next_weapon:;
                 }
             }
         }
@@ -160,66 +185,15 @@ namespace Tinker.Silk.Bridge
             if (breakSegmentIndex == -1) return;
 
             List<Vector2> path1 = new List<Vector2>();
-            for (int i = 0; i <= breakSegmentIndex; i++)
-            {
-                path1.Add(path[i]);
-            }
+            for (int i = 0; i <= breakSegmentIndex; i++) path1.Add(path[i]);
             path1.Add(breakPoint);
 
             List<Vector2> path2 = new List<Vector2>();
             path2.Add(breakPoint);
-            for (int i = breakSegmentIndex + 1; i < path.Count; i++)
-            {
-                path2.Add(path[i]);
-            }
+            for (int i = breakSegmentIndex + 1; i < path.Count; i++) path2.Add(path[i]);
 
-            if (path1.Count >= 2)
-                animations.Add(new BrokenSilkAnimation(path1, room));
-            if (path2.Count >= 2)
-                animations.Add(new BrokenSilkAnimation(path2, room));
-        }
-
-        private static void Room_WeaponSilkCheck(On.Room.orig_Update orig, Room self)
-        {
-            orig(self);
-
-            var bridges = SilkBridgeManager.GetBridgesInRoom(self);
-            if (bridges == null || bridges.Count == 0) return;
-
-            foreach (var obj in self.physicalObjects)
-            {
-                foreach (var phys in obj)
-                {
-                    if (phys is Weapon weapon && !weapon.slatedForDeletetion)
-                    {
-                        if (weapon.thrownBy == null || weapon.mode != Weapon.Mode.Thrown) continue;
-
-                        var chunk = weapon.firstChunk;
-                        foreach (var bridge in bridges)
-                        {
-                            if (!bridge.IsActive) continue;
-                            var path = bridge.GetRenderPath();
-                            if (path.Count < 2) continue;
-
-                            for (int i = 0; i < path.Count - 1; i++)
-                            {
-                                Vector2 segStart = path[i];
-                                Vector2 segEnd = path[i + 1];
-
-                                if (SilkBridgeManager.SegmentIntersection(chunk.lastPos, chunk.pos, segStart, segEnd, out Vector2 intersection, out _))
-                                {
-
-                                    bridge.TakeDamage(bridge.health + 1f, intersection);
-                                    BrokenSilkManager.TriggerBreakAnimation(path, self, intersection);
-
-                                    goto next_weapon;
-                                }
-                            }
-                        }
-                    }
-                next_weapon:;
-                }
-            }
+            if (path1.Count >= 2) animations.Add(new BrokenSilkAnimation(path1, room));
+            if (path2.Count >= 2) animations.Add(new BrokenSilkAnimation(path2, room));
         }
     }
 
@@ -228,118 +202,116 @@ namespace Tinker.Silk.Bridge
         public Room Room { get; private set; }
         public bool IsFinished => fadeAlpha <= 0f;
 
-        private TriangleMesh mesh;
+        private TriangleMesh lineMesh;
         private Vector2[] positions;
         private Vector2[] lastPositions;
-        private Vector2[] velocities;
-        private float fadeAlpha;
-        private float fadeThickness;
-        private float fadeSwayPhase;
+        private float fadeAlpha = 1f;
+        private float segmentLength;
+        private Color silkColor;
 
         private const int RENDER_SEGMENTS = 20;
-        private const float FADE_ALPHA_DECAY = 0.025f;
-        private const float FADE_THICKNESS_DECAY = 0.02f;
-        private const float FADE_GRAVITY = 0.3f;
+        private const float FADE_ALPHA_DECAY = 0.015f;
+        private const float FADE_GRAVITY = 0.8f;
+        private const float FADE_FRICTION = 0.92f;
+        private const int PHYSICS_ITERATIONS = 4;
 
         public BrokenSilkAnimation(List<Vector2> path, Room room)
         {
             this.Room = room;
+            this.silkColor = new Color(0.9f, 0.9f, 0.9f);
+            positions = new Vector2[RENDER_SEGMENTS];
+            lastPositions = new Vector2[RENDER_SEGMENTS];
 
-            positions = new Vector2[path.Count];
-            lastPositions = new Vector2[path.Count];
-            velocities = new Vector2[path.Count];
-            for (int i = 0; i < path.Count; i++)
+            for (int i = 0; i < RENDER_SEGMENTS; i++)
             {
-                positions[i] = path[i];
-                lastPositions[i] = path[i];
-                velocities[i] = new Vector2((Random.value - 0.5f) * 2.5f, -Random.value * 2f);
+                float t = (float)i / (RENDER_SEGMENTS - 1);
+                Vector2 pos = GetPathPoint(path, t);
+                positions[i] = pos;
+                lastPositions[i] = pos - new Vector2(Random.Range(-1.5f, 1.5f), Random.Range(-0.5f, 1f));
             }
 
-            fadeAlpha = 1f;
-            fadeThickness = 1.2f;
-            fadeSwayPhase = Random.value * Mathf.PI * 2f;
+            segmentLength = Vector2.Distance(positions[0], positions[1]);
+            lineMesh = TriangleMesh.MakeLongMesh(RENDER_SEGMENTS, false, true);
+            lineMesh.shader = room.game.rainWorld.Shaders["Basic"];
+        }
 
-            TriangleMesh.Triangle[] tris = new TriangleMesh.Triangle[(RENDER_SEGMENTS - 1) * 2];
-            for (int i = 0; i < RENDER_SEGMENTS - 1; i++)
-            {
-                int v = i * 4;
-                tris[i * 2] = new TriangleMesh.Triangle(v, v + 1, v + 2);
-                tris[i * 2 + 1] = new TriangleMesh.Triangle(v + 1, v + 2, v + 3);
-            }
-            mesh = new TriangleMesh("Futile_White", tris, false, false);
+        private Vector2 GetPathPoint(List<Vector2> path, float t)
+        {
+            float sourceIndexF = t * (path.Count - 1);
+            int idxA = Mathf.FloorToInt(sourceIndexF);
+            int idxB = Mathf.Min(path.Count - 1, idxA + 1);
+            float localT = sourceIndexF - idxA;
+            return Vector2.Lerp(path[idxA], path[idxB], localT);
         }
 
         public void Update()
         {
-            if (IsFinished) return;
-
-            fadeSwayPhase += 0.1f;
+            if (IsFinished || Room == null) return;
             for (int i = 0; i < positions.Length; i++)
             {
+                Vector2 vel = (positions[i] - lastPositions[i]) * FADE_FRICTION;
                 lastPositions[i] = positions[i];
-                velocities[i].y -= FADE_GRAVITY;
-                velocities[i].x *= 0.98f;
-                velocities[i].x += Mathf.Sin(fadeSwayPhase + i * 0.5f) * 0.2f * fadeAlpha;
-                positions[i] += velocities[i];
+                positions[i] += vel;
+                positions[i].y -= FADE_GRAVITY;
             }
-
+            for (int iter = 0; iter < PHYSICS_ITERATIONS; iter++)
+            {
+                for (int i = 0; i < positions.Length - 1; i++)
+                {
+                    float d = Vector2.Distance(positions[i], positions[i + 1]);
+                    if (d > 0.1f)
+                    {
+                        float diff = (segmentLength - d) / d;
+                        Vector2 offset = (positions[i] - positions[i + 1]) * diff * 0.5f;
+                        positions[i] += offset;
+                        positions[i + 1] -= offset;
+                    }
+                }
+            }
             fadeAlpha -= FADE_ALPHA_DECAY;
-            fadeThickness -= FADE_THICKNESS_DECAY;
         }
 
         public void Draw(RoomCamera rCam, float timeStacker)
         {
             if (IsFinished || rCam.room != this.Room)
             {
-                if (mesh.container != null) mesh.RemoveFromContainer();
+                Destroy();
                 return;
             }
-
-            if (mesh.container == null)
-                rCam.ReturnFContainer("Midground").AddChild(mesh);
-
-            Vector2[] renderPoints = new Vector2[RENDER_SEGMENTS];
+            if (lineMesh.container == null) rCam.ReturnFContainer("Midground").AddChild(lineMesh);
+            lineMesh.isVisible = true;
+            Vector2 camPos = rCam.pos;
+            float baseWidth = 1.2f * Mathf.InverseLerp(0f, 0.3f, fadeAlpha);
+            Vector2 lastP = Vector2.Lerp(lastPositions[0], positions[0], timeStacker);
+            float lastWidth = 0f;
             for (int i = 0; i < RENDER_SEGMENTS; i++)
             {
                 float t = (float)i / (RENDER_SEGMENTS - 1);
-                float pathT = t * (positions.Length - 1);
-                int idxA = Mathf.FloorToInt(pathT);
-                int idxB = Mathf.Min(positions.Length - 1, idxA + 1);
-
-                Vector2 posA = Vector2.Lerp(lastPositions[idxA], positions[idxA], timeStacker);
-                Vector2 posB = Vector2.Lerp(lastPositions[idxB], positions[idxB], timeStacker);
-
-                renderPoints[i] = Vector2.Lerp(posA, posB, pathT - idxA);
-            }
-
-            float width = 2.0f * fadeThickness;
-            Vector2 camPos = rCam.pos;
-            for (int i = 0; i < RENDER_SEGMENTS - 1; i++)
-            {
-                Vector2 start = renderPoints[i];
-                Vector2 end = renderPoints[i + 1];
-                if ((start - end).sqrMagnitude < 0.1f) continue;
-
-                Vector2 dir = (end - start).normalized;
+                Vector2 currentP = Vector2.Lerp(lastPositions[i], positions[i], timeStacker);
+                float segmentWidth = baseWidth * (1f - Mathf.Abs(t * 2f - 1f) * 0.2f);
+                Vector2 dir = (currentP - lastP).normalized;
+                if (dir.magnitude < 0.001f) dir = Vector2.up;
                 Vector2 perp = Custom.PerpendicularVector(dir);
-
                 int v = i * 4;
-                mesh.MoveVertice(v, start - perp * width * 0.5f - camPos);
-                mesh.MoveVertice(v + 1, start + perp * width * 0.5f - camPos);
-                mesh.MoveVertice(v + 2, end - perp * width * 0.5f - camPos);
-                mesh.MoveVertice(v + 3, end + perp * width * 0.5f - camPos);
+                Vector2 hA = perp * ((segmentWidth + lastWidth) * 0.5f);
+                Vector2 hB = perp * segmentWidth;
+                lineMesh.MoveVertice(v, (lastP + currentP) / 2f - hA - camPos);
+                lineMesh.MoveVertice(v + 1, (lastP + currentP) / 2f + hA - camPos);
+                lineMesh.MoveVertice(v + 2, currentP - hB - camPos);
+                lineMesh.MoveVertice(v + 3, currentP + hB - camPos);
+                for (int j = 0; j < 4; j++) lineMesh.verticeColors[v + j] = silkColor;
+                lastP = currentP;
+                lastWidth = segmentWidth;
             }
-
-            mesh.alpha = fadeAlpha > 0 ? fadeAlpha : 0;
-            mesh.color = Color.white;
+            lineMesh.alpha = fadeAlpha;
         }
 
         public void Destroy()
         {
-            if (mesh != null)
+            if (lineMesh != null)
             {
-                mesh.RemoveFromContainer();
-                mesh = null;
+                lineMesh.RemoveFromContainer();
+                lineMesh = null;
             }
         }
     }

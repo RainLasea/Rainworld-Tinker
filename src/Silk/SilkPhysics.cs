@@ -34,6 +34,10 @@ namespace tinker.Silk
         private const int MAX_SEGMENTS = 50;
         private readonly ICollisionProvider collisionProvider;
         private int frameCounter;
+        public int superJumpTimer = 0;
+        private float superJumpStartLength;
+        private const int SUPER_JUMP_DURATION = 6;
+        public float superJumpBaseLength;
 
         public SilkPhysics(Player player, ICollisionProvider collisionProvider = null)
         {
@@ -70,6 +74,11 @@ namespace tinker.Silk
 
         public void Shoot(Vector2 direction)
         {
+            if (!tinkerSilkData.RequestEnergy(player, 5f)) return;
+            ropeSegmentPoints.Clear();
+            segmentLastChanged.Clear();
+            segmentBridgeAttachments.Clear();
+
             ResetState();
             pos = lastPos = baseChunk.pos;
             vel = direction.normalized * SHOOT_SPEED;
@@ -77,7 +86,14 @@ namespace tinker.Silk
             idealRopeLength = MAX_ROPE_LENGTH;
         }
 
-        public void Release(bool instant = false) { instantDisappear = instant; ResetState(); }
+        public void Release(bool instant = false)
+        {
+            instantDisappear = instant;
+            if (mode != SilkMode.Retracted)
+            {
+                mode = SilkMode.Retracted;
+            }
+        }
 
         public void DetachPhysicsOnly()
         {
@@ -110,9 +126,6 @@ namespace tinker.Silk
             attachedBridge = null;
             requestedRopeLength = elastic = 0f;
             pullingObject = returning = false;
-            ropeSegmentPoints.Clear();
-            segmentLastChanged.Clear();
-            segmentBridgeAttachments.Clear();
         }
 
         private void UpdateRetracted() => pos = lastPos = baseChunk.pos;
@@ -228,8 +241,21 @@ namespace tinker.Silk
         private void UpdateRopeLength()
         {
             if (pullingObject) return;
-            elastic = Mathf.Max(0f, elastic - 0.05f);
-            requestedRopeLength = Mathf.MoveTowards(requestedRopeLength, idealRopeLength, (1f - elastic) * 10f);
+
+            if (superJumpTimer > 0)
+            {
+                superJumpTimer--;
+                float targetGoal = superJumpBaseLength * 0.6f;
+                float progress = 1f - ((float)superJumpTimer / 5f);
+                idealRopeLength = Mathf.Lerp(superJumpBaseLength, targetGoal, progress);
+                requestedRopeLength = idealRopeLength;
+                baseChunk.vel.y += 0.8f;
+            }
+            else
+            {
+                elastic = Mathf.Max(0f, elastic - 0.05f);
+                requestedRopeLength = Mathf.MoveTowards(requestedRopeLength, idealRopeLength, (1f - elastic) * 10f);
+            }
         }
 
         private PhysicalObject CheckObjectCollision(Vector2 checkPos)

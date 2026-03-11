@@ -1,0 +1,20 @@
+{"frames": {
+
+"Mouse.png":
+{
+	"frame": {"x":0,"y":0,"w":16,"h":16},
+	"rotated": false,
+	"trimmed": false,
+	"spriteSourceSize": {"x":0,"y":0,"w":16,"h":16},
+	"sourceSize": {"w":16,"h":16}
+}},
+"meta": {
+	"app": "https://www.codeandweb.com/texturepacker",
+	"version": "1.0",
+	"image": "Mouse.png",
+	"format": "RGBA8888",
+	"size": {"w":16,"h":16},
+	"scale": "1",
+	"smartupdate": "$TexturePacker:SmartUpdate:9e201758b1733f470fa8fda874bd8ad8:db2b44cd3de8a8cc18948adc9ef36ce9:62d23f99eb94072d10adbab2bec66e06$"
+}
+}

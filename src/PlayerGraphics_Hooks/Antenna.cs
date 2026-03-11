@@ -156,6 +156,8 @@ namespace Tinker.PlayerGraphics_Hooks
         private float zOffset = 0f;
         private Vector2 tipVel;
 
+        private float crawlAmount;
+
         public MainAntenna(PlayerGraphics graphics, Player player, bool isLeft, float angleOffset)
         {
             this.graphics = graphics;
@@ -179,6 +181,9 @@ namespace Tinker.PlayerGraphics_Hooks
         public override void Update()
         {
             if (player == null || player.room == null || graphics == null) return;
+
+            bool isCrawling = player.bodyMode == Player.BodyModeIndex.Crawl || player.bodyMode == Player.BodyModeIndex.CorridorClimb;
+            crawlAmount = Mathf.Lerp(crawlAmount, isCrawling ? 1f : 0f, 0.1f);
 
             for (int i = 0; i <= segments; i++)
             {
@@ -310,21 +315,36 @@ namespace Tinker.PlayerGraphics_Hooks
 
         private void UpdatePhysics()
         {
-            for (int i = 0; i <= segments; i++)
-            {
-                currentPoints[i] = idealPoints[i];
-            }
+            currentPoints[0] = idealPoints[0];
+
+            float stiffness = 0.42f;
+            float friction = 0.75f;
 
             for (int i = 1; i <= segments; i++)
             {
-                Vector2 toNext = currentPoints[i] - currentPoints[i - 1];
-                float dist = toNext.magnitude;
-                float stretch = dist - segmentLength;
-                if (dist > 0.01f)
+                Vector2 vel = (currentPoints[i] - lastPoints[i]) * friction;
+                currentPoints[i] += vel;
+
+                currentPoints[i] += (idealPoints[i] - currentPoints[i]) * stiffness;
+
+                currentPoints[i].y -= 0.05f;
+            }
+
+            for (int j = 0; j < 2; j++)
+            {
+                for (int i = 1; i <= segments; i++)
                 {
-                    Vector2 dir = toNext / dist;
-                    currentPoints[i] -= dir * stretch * 0.5f;
-                    currentPoints[i - 1] += dir * stretch * 0.5f;
+                    Vector2 distVec = currentPoints[i] - currentPoints[i - 1];
+                    float len = distVec.magnitude;
+                    if (len > 0.01f)
+                    {
+                        Vector2 dir = distVec / len;
+                        float overlap = len - segmentLength;
+
+                        float forceDistribution = (i == 1) ? 1.0f : 0.5f;
+                        currentPoints[i] -= dir * overlap * forceDistribution;
+                        if (i > 1) currentPoints[i - 1] += dir * overlap * (1f - forceDistribution);
+                    }
                 }
             }
         }

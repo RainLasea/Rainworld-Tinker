@@ -1,0 +1,20 @@
+{"frames": {
+
+"Small_Tinker.png":
+{
+	"frame": {"x":0,"y":0,"w":20,"h":20},
+	"rotated": false,
+	"trimmed": false,
+	"spriteSourceSize": {"x":0,"y":0,"w":20,"h":20},
+	"sourceSize": {"w":20,"h":20}
+}},
+"meta": {
+	"app": "https://www.codeandweb.com/texturepacker",
+	"version": "1.0",
+	"image": "Small_Tinker.png",
+	"format": "RGBA8888",
+	"size": {"w":20,"h":20},
+	"scale": "1",
+	"smartupdate": "$TexturePacker:SmartUpdate:dff6fc89f89386a242612b62117d545c:afd0a20bf4a1f7a4d24bb2bffaa46035:a766a23bd0553331bb997a7df9f3667c$"
+}
+}

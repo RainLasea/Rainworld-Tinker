@@ -30,42 +30,42 @@ namespace tinker
         {
             base.Initialize();
 
-            OpTab abilityTab = new OpTab(this, "Abilities");
-            OpTab appearanceTab = new OpTab(this, "Appearance");
-            OpTab miscTab = new OpTab(this, "Misc");
+            OpTab abilityTab = new OpTab(this, Translate("Abilities"));
+            OpTab appearanceTab = new OpTab(this, Translate("Appearance"));
+            OpTab miscTab = new OpTab(this, Translate("Misc"));
 
             miscTab.colorButton = Color.red;
 
             this.Tabs = new OpTab[] { abilityTab, appearanceTab, miscTab };
 
             abilityTab.AddItems(
-                new OpLabel(new Vector2(0f, 570f), new Vector2(600f, 30f), "ABILITIES", FLabelAlignment.Center, true),
-                new OpLabel(new Vector2(0f, 540f), new Vector2(600f, 20f), "Customize and toggle the innate powers of the Tinker.", FLabelAlignment.Center, false),
+                new OpLabel(new Vector2(0f, 570f), new Vector2(600f, 30f), Translate("ABILITIES"), FLabelAlignment.Center, true),
+                new OpLabel(new Vector2(0f, 540f), new Vector2(600f, 20f), Translate("Customize and toggle the innate powers of the Tinker."), FLabelAlignment.Center, false),
 
                 new OpCheckBox(mouseAimConfig, new Vector2(50f, 490f)),
-                new OpLabel(90f, 490f, "Enable Mouse Aim Throw"),
+                new OpLabel(90f, 490f, Translate("Enable Mouse Aim Throw")),
 
                 new OpCheckBox(nightVisionConfig, new Vector2(50f, 440f)),
-                new OpLabel(90f, 440f, "Enable Night Vision"),
+                new OpLabel(90f, 440f, Translate("Enable Night Vision")),
 
                 new OpKeyBinder(silkShootKeyConfig, new Vector2(50f, 390f), new Vector2(100f, 30f)),
-                new OpLabel(160f, 390f, "Silk Shoot Key")
+                new OpLabel(160f, 390f, Translate("Silk Shoot Key"))
             );
 
             appearanceTab.AddItems(
-                new OpLabel(new Vector2(0f, 570f), new Vector2(600f, 30f), "APPEARANCE", FLabelAlignment.Center, true),
-                new OpLabel(new Vector2(0f, 540f), new Vector2(600f, 20f), "Visual and cosmetic settings for the Tinker.", FLabelAlignment.Center, false),
+                new OpLabel(new Vector2(0f, 570f), new Vector2(600f, 30f), Translate("APPEARANCE"), FLabelAlignment.Center, true),
+                new OpLabel(new Vector2(0f, 540f), new Vector2(600f, 20f), Translate("Visual and cosmetic settings for the Tinker."), FLabelAlignment.Center, false),
 
                 new OpCheckBox(antennaRenderConfig, new Vector2(50f, 490f)),
-                new OpLabel(90f, 490f, "Enable Antenna Rendering")
+                new OpLabel(90f, 490f, Translate("Enable Antenna Rendering"))
             );
 
             miscTab.AddItems(
-                new OpLabel(new Vector2(0f, 570f), new Vector2(600f, 30f), "MISC", FLabelAlignment.Center, true),
-                new OpLabel(new Vector2(0f, 540f), new Vector2(600f, 20f), "Extra settings", FLabelAlignment.Center, false),
+                new OpLabel(new Vector2(0f, 570f), new Vector2(600f, 30f), Translate("MISC"), FLabelAlignment.Center, true),
+                new OpLabel(new Vector2(0f, 540f), new Vector2(600f, 20f), Translate("Extra settings"), FLabelAlignment.Center, false),
 
                 new OpCheckBox(languageHintConfig, new Vector2(50f, 490f)),
-                new OpLabel(90f, 490f, "Enable Demo Version Hint")
+                new OpLabel(90f, 490f, Translate("Enable Demo Version Hint"))
             );
         }
     }

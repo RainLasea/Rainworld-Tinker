@@ -1,7 +1,7 @@
-﻿using RWCustom;
-using System.Collections.Generic;
-using UnityEngine;
+﻿using System.Collections.Generic;
 using Tinker.Silk.Bridge;
+using UnityEngine;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Silk
 {
@@ -14,6 +14,7 @@ namespace tinker.Silk
         private static readonly Dictionary<int, bool> rightMouseDownLastFrame = new();
         private static readonly Dictionary<int, bool> leftMouseDownLastFrame = new();
         private static readonly Dictionary<int, Room> lastPlayerRoom = new();
+        private static readonly Dictionary<int, bool> jumpLastFrame = new();
 
         public static bool IsShooting(Player player)
         {
@@ -38,6 +39,7 @@ namespace tinker.Silk
             rightMouseDownLastFrame.Clear();
             leftMouseDownLastFrame.Clear();
             lastPlayerRoom.Clear();
+            jumpLastFrame.Clear();
         }
 
         private static void PlayerGraphics_SuckedIntoShortCut(On.PlayerGraphics.orig_SuckedIntoShortCut self, PlayerGraphics selfGraphics, Vector2 shortCutPosition)
@@ -56,9 +58,11 @@ namespace tinker.Silk
         private static Vector2 GetMouseAimDirection(Player player)
         {
             var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
+            bool useMouse = cam != null;
+
             Vector2 aimVector;
 
-            if (cam != null)
+            if (useMouse)
             {
                 Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
                 Vector2 headPos = player.bodyChunks[0].pos;
@@ -66,10 +70,10 @@ namespace tinker.Silk
             }
             else
             {
-                if (player.bodyChunks[0].vel.magnitude > 0.5f)
-                    aimVector = player.bodyChunks[0].vel;
-                else if (player.input[0].x != 0 || player.input[0].y != 0)
+                if (player.input[0].x != 0 || player.input[0].y != 0)
                     aimVector = new Vector2(player.input[0].x, player.input[0].y);
+                else if (player.bodyChunks[0].vel.magnitude > 0.5f)
+                    aimVector = player.bodyChunks[0].vel;
                 else
                     aimVector = Vector2.right * player.flipDirection;
             }
@@ -83,21 +87,18 @@ namespace tinker.Silk
         private static Vector2 GetMouseAimDirectionFromPoint(Vector2 referencePoint, Player player)
         {
             var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
+            bool useMouse = cam != null;
+
             Vector2 aimVector;
 
-            if (cam != null)
+            if (useMouse)
             {
-                Vector2 mouseWorldPos = new Vector2(
-                    Futile.mousePosition.x + cam.pos.x,
-                    Futile.mousePosition.y + cam.pos.y
-                );
+                Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
                 aimVector = mouseWorldPos - referencePoint;
             }
             else
             {
-                if (player.bodyChunks[0].vel.magnitude > 0.5f)
-                    aimVector = player.bodyChunks[0].vel;
-                else if (player.input[0].x != 0 || player.input[0].y != 0)
+                if (player.input[0].x != 0 || player.input[0].y != 0)
                     aimVector = new Vector2(player.input[0].x, player.input[0].y);
                 else
                     aimVector = Vector2.right * player.flipDirection;
@@ -127,8 +128,6 @@ namespace tinker.Silk
 
             bool isTinker = self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
             if (!isTinker) return;
-
-            if (Plugin.SilkFeatureEnabled != null && Plugin.SilkFeatureEnabled.TryGet(self, out bool featureEnabled) && !featureEnabled) return;
 
             int playerNum = self.playerState?.playerNumber ?? -1;
             if (playerNum < 0) return;
@@ -161,6 +160,10 @@ namespace tinker.Silk
             bool wasVerticalInput = verticalInputLastFrame.GetValueOrDefault(playerNum);
             bool currentVerticalInput = self.input[0].y != 0;
             verticalInputLastFrame[playerNum] = currentVerticalInput;
+
+            bool wasJumping = jumpLastFrame.GetValueOrDefault(playerNum);
+            bool isJumping = self.input[0].jmp;
+            jumpLastFrame[playerNum] = isJumping;
 
             bool inBridgeMode = bridgeState?.active == true;
             bool animationRunning = bridgeState?.animating == true;
@@ -210,14 +213,29 @@ namespace tinker.Silk
                     silk.idealRopeLength = MIN_ROPE_VISIBLE;
             }
 
-            Options.ControlSetup controlSetup = RWCustom.Custom.rainWorld.options.controls[self.playerState.playerNumber];
-            KeyCode jumpKey = controlSetup.KeyboardJump;
+            bool jumpTriggered = isJumping && !wasJumping;
 
-            bool jumpPressed = Input.GetKeyDown(jumpKey) || self.input[0].jmp;
-
-            if (jumpPressed && silk.Attached)
+            if (jumpTriggered && silk.Attached)
             {
-                silk.Release();
+                const int TRIGGER_WINDOW = 6;
+
+                if (silk.attachedTime <= TRIGGER_WINDOW)
+                {
+                    silk.superJumpTimer = 5;
+                    silk.superJumpBaseLength = Vector2.Distance(self.mainBodyChunk.pos, silk.pos);
+                    Vector2 toAnchor = (silk.pos - self.mainBodyChunk.pos).normalized;
+                    Vector2 burstVel = Vector2.up * 10f + toAnchor * 6f;
+
+                    for (int i = 0; i < self.bodyChunks.Length; i++)
+                    {
+                        self.bodyChunks[i].vel += burstVel;
+                    }
+                    self.jumpBoost += 2f;
+                }
+                else
+                {
+                    silk.Release();
+                }
                 return;
             }
 
@@ -270,6 +288,18 @@ namespace tinker.Silk
                     }
                 }
             }
+
+            if (self.input[0].pckp && !self.input[1].pckp)
+            {
+                foreach (var bridge in SilkBridgeManager.GetBridgesInRoom(self.room))
+                {
+                    if (bridge.TryDetachObject(self, out PhysicalObject detachedObj))
+                    {
+                        break;
+                    }
+                }
+            }
+
             if (!inBridgeMode && !SilkClimb.IsClimbing(self) && self.Consious && self.bodyMode != Player.BodyModeIndex.CorridorClimb)
             {
                 if (self.input[0].y > 0)

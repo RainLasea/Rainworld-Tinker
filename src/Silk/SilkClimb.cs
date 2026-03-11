@@ -1,7 +1,9 @@
 ﻿using RWCustom;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Tinker.Silk.Bridge;
 using UnityEngine;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Silk
 {
@@ -21,8 +23,7 @@ namespace tinker.Silk
             public Vector2 fromPos;
             public int counter;
             public int duration = 8;
-
-            public float Progress => (float)counter / duration;
+            public float Progress => Mathf.Clamp01((float)counter / duration);
         }
 
         private class ClimbState
@@ -35,56 +36,58 @@ namespace tinker.Silk
             public Vector2 smoothedAttachPoint;
             public bool Active => ClimbTarget != null && ClimbTarget.IsActive;
             public SwitchingState switching;
+            public int switchCooldown;
         }
 
-        private static readonly ConditionalWeakTable<Player, ClimbState> climbStates =
-            new ConditionalWeakTable<Player, ClimbState>();
+        private static readonly ConditionalWeakTable<Player, ClimbState> climbStates = new ConditionalWeakTable<Player, ClimbState>();
+
+        private static FieldInfo noGrabCounterField;
+
+        private static int GetNoGrabCounter(Player player)
+        {
+            if (noGrabCounterField == null)
+            {
+                noGrabCounterField = typeof(Player).GetField("noGrabCounter", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            return (int)noGrabCounterField.GetValue(player);
+        }
+
+        private static void SetNoGrabCounter(Player player, int value)
+        {
+            if (noGrabCounterField == null)
+            {
+                noGrabCounterField = typeof(Player).GetField("noGrabCounter", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            noGrabCounterField.SetValue(player, value);
+        }
 
         public static bool IsClimbing(Player player)
         {
             return climbStates.TryGetValue(player, out var state) && state.Active;
         }
 
-        public static void AttachPlayerToSilk(Player player, IClimbableSilk silk, int segIndex, float t)
+        public static void AttachPlayerToSilk(Player player, IClimbableSilk silk, int seg, float t)
         {
-            if (IsNearVanillaPole(player)) return;
-
-            if (player == null || silk == null) return;
-
+            if (GetNoGrabCounter(player) > 0) return;
             var state = climbStates.GetOrCreateValue(player);
+            if (state.switching != null) return;
+
             state.ClimbTarget = silk;
-            state.SegmentIndex = Mathf.Clamp(segIndex, 0, silk.SegmentCount - 1);
-            state.T = Mathf.Clamp01(t);
-            state.IsHanging = false;
-            state.smoothedAttachPoint = silk.GetPointOnSegment(state.SegmentIndex, state.T);
-            state.switching = null;
+            state.SegmentIndex = seg;
+            state.T = t;
+            player.mainBodyChunk.vel *= 0.3f;
 
-            Vector2 tangent = ComputeSegmentTangent(silk, state.SegmentIndex, state.T);
-            float angle = Vector2.Angle(tangent, Vector2.up);
-            if (angle < 45f || angle > 135f)
+            state.switching = new SwitchingState
             {
-                state.CurrentClimbMode = ClimbMode.VerticalClimb;
-                player.animation = Player.AnimationIndex.ClimbOnBeam;
-            }
-            else
-            {
-                state.CurrentClimbMode = ClimbMode.HorizontalClimb;
-                state.IsHanging = player.bodyChunks[0].pos.y < silk.GetPointOnSegment(segIndex, t).y;
-                player.animation = state.IsHanging ? Player.AnimationIndex.HangFromBeam : Player.AnimationIndex.StandOnBeam;
-            }
+                toSilk = silk,
+                toSeg = seg,
+                toT = t,
+                duration = 8,
+                counter = 0,
+                fromPos = player.mainBodyChunk.pos
+            };
 
-            player.bodyMode = Player.BodyModeIndex.ClimbingOnBeam;
-            player.standing = true;
-            player.canJump = 1;
-
-            Vector2 p = silk.GetPointOnSegment(state.SegmentIndex, state.T);
-            AlignPlayerToPoint(player, p, state);
-
-            var silkPhysics = tinkerSilkData.Get(player);
-            if (silkPhysics != null && silkPhysics.Attached)
-            {
-                silkPhysics.Release();
-            }
+            player.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, player.mainBodyChunk);
         }
 
         public static void DetachPlayerFromSilk(Player player)
@@ -94,6 +97,7 @@ namespace tinker.Silk
             {
                 state.ClimbTarget = null;
                 state.switching = null;
+                SetNoGrabCounter(player, 15);
             }
 
             if (player.bodyMode == Player.BodyModeIndex.ClimbingOnBeam)
@@ -117,7 +121,7 @@ namespace tinker.Silk
 
         private static void Player_UpdateBodyMode(On.Player.orig_UpdateBodyMode orig, Player self)
         {
-            if (climbStates.TryGetValue(self, out var state) && state.Active)
+            if (climbStates.TryGetValue(self, out var state) && (state.Active || state.switching != null))
             {
                 UpdateSilkClimbPhysics(self, state);
             }
@@ -129,6 +133,8 @@ namespace tinker.Silk
 
         private static void UpdateSilkClimbPhysics(Player self, ClimbState state)
         {
+            if (state.switchCooldown > 0) state.switchCooldown--;
+
             if (state.switching != null)
             {
                 UpdateSwitching(self, state);
@@ -170,45 +176,66 @@ namespace tinker.Silk
             if (magnitude > 0.001f)
             {
                 vector.Normalize();
-                self.bodyChunks[0].pos += vector * num * 0.9f;
-                self.bodyChunks[0].vel += vector * num * 0.9f;
-                self.bodyChunks[1].pos -= vector * num * 0.1f;
-                self.bodyChunks[1].vel -= vector * num * 0.1f;
+                self.bodyChunks[0].pos += vector * num * 0.7f;
+                self.bodyChunks[0].vel += vector * num * 0.7f;
+                self.bodyChunks[1].pos -= vector * num * 0.3f;
+                self.bodyChunks[1].vel -= vector * num * 0.3f;
             }
 
             Vector2 targetPointOnSilk = silk.GetPointOnSegment(state.SegmentIndex, state.T);
-            state.smoothedAttachPoint = Vector2.Lerp(state.smoothedAttachPoint, targetPointOnSilk, 0.3f);
+            state.smoothedAttachPoint = Vector2.Lerp(state.smoothedAttachPoint, targetPointOnSilk, 0.4f);
 
             Vector2 moveDir = (self.mainBodyChunk.pos - state.smoothedAttachPoint);
             if (moveDir.sqrMagnitude > 1f)
             {
-                Vector2 force = Vector2.down * self.gravity * self.TotalMass * 1.5f;
+                Vector2 force = Vector2.down * self.gravity * self.TotalMass * 1.2f;
                 try { silk.ApplyClimbForce(state.smoothedAttachPoint, force); } catch { }
             }
         }
 
         private static void UpdateSwitching(Player player, ClimbState state)
         {
+            if (state.switching == null || state.switching.toSilk == null)
+            {
+                state.switching = null;
+                return;
+            }
+
             state.switching.counter++;
+            float smoothProgress = Mathf.SmoothStep(0f, 1f, state.switching.Progress);
+
             Vector2 targetPos = state.switching.toSilk.GetPointOnSegment(state.switching.toSeg, state.switching.toT);
-            Vector2 newPos = Vector2.Lerp(state.switching.fromPos, targetPos, state.switching.Progress);
-            
+            Vector2 newPos = Vector2.Lerp(state.switching.fromPos, targetPos, smoothProgress);
+
+            player.mainBodyChunk.vel *= 0.85f;
             AlignPlayerToPoint(player, newPos, state);
 
             if (state.switching.counter >= state.switching.duration)
             {
-                AttachPlayerToSilk(player, state.switching.toSilk, state.switching.toSeg, state.switching.toT);
+                var finalSilk = state.switching.toSilk;
+                var finalSeg = state.switching.toSeg;
+                var finalT = state.switching.toT;
+
+                state.switching = null;
+                state.ClimbTarget = finalSilk;
+                state.SegmentIndex = finalSeg;
+                state.T = finalT;
+                state.smoothedAttachPoint = targetPos;
+
+                player.bodyMode = Player.BodyModeIndex.ClimbingOnBeam;
+                player.animation = Player.AnimationIndex.ClimbOnBeam;
+                player.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, player.mainBodyChunk, false, 1f, 1.1f);
             }
         }
 
-        private const float SilkClimbGrabRange = 22f;
+        private const float SilkClimbGrabRange = 24f;
 
         private static bool TrySwitchBridge(Player self, ClimbState state, int inputX, int inputY)
         {
-            if (IsNearVanillaPole(self)) return false;
+            if (state.switchCooldown > 0 || IsNearVanillaPole(self)) return false;
 
             Vector2 checkDir = new Vector2(inputX, inputY);
-            Vector2 checkPos = self.mainBodyChunk.pos + checkDir * 8f;
+            Vector2 checkPos = self.mainBodyChunk.pos + checkDir * 10f;
             SilkBridge targetBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, SilkClimbGrabRange, b => b != state.ClimbTarget);
 
             if (targetBridge != null)
@@ -219,24 +246,25 @@ namespace tinker.Silk
 
                 if (Vector2.Distance(checkPos, closestPoint) < SilkClimbGrabRange)
                 {
-                    bool isTargetHorizontal = false;
                     Vector2 targetTangent = ComputeSegmentTangent(targetBridge, segIndex, t);
                     float angle = Vector2.Angle(targetTangent, Vector2.up);
-                    if (angle >= 55f && angle <= 125f) isTargetHorizontal = true;
+                    bool isTargetHorizontal = (angle >= 55f && angle <= 125f);
 
                     bool shouldSwitch = (state.CurrentClimbMode == ClimbMode.VerticalClimb && isTargetHorizontal && inputX != 0) ||
                                         (state.CurrentClimbMode == ClimbMode.HorizontalClimb && !isTargetHorizontal && inputY != 0);
 
                     if (shouldSwitch)
                     {
+                        state.switchCooldown = 15;
                         state.switching = new SwitchingState
                         {
                             toSilk = targetBridge,
                             toSeg = segIndex,
                             toT = t,
-                            fromPos = self.mainBodyChunk.pos
+                            fromPos = self.mainBodyChunk.pos,
+                            duration = 7
                         };
-                        self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 0.7f, 1.1f);
+                        self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 0.6f, 1.2f);
                         return true;
                     }
                 }
@@ -249,8 +277,8 @@ namespace tinker.Silk
             var silk = state.ClimbTarget;
             self.animation = Player.AnimationIndex.ClimbOnBeam;
 
-            self.bodyChunks[0].vel *= 0.8f;
-            self.bodyChunks[1].vel *= 0.8f;
+            self.bodyChunks[0].vel *= 0.75f;
+            self.bodyChunks[1].vel *= 0.75f;
 
             if (self.input[0].x != 0 && self.input[1].x == 0)
             {
@@ -259,9 +287,9 @@ namespace tinker.Silk
 
             if (self.input[0].jmp && !self.input[1].jmp)
             {
-                Vector2 jumpDir = (tangent * self.input[0].x * 0.8f + Vector2.up * 0.6f).normalized;
-                self.jumpBoost = 6f;
-                self.bodyChunks[0].vel = jumpDir * 9f;
+                Vector2 jumpDir = (tangent * self.input[0].x * 0.8f + Vector2.up * 0.7f).normalized;
+                self.jumpBoost = 7f;
+                self.bodyChunks[0].vel = jumpDir * 10f;
                 self.bodyChunks[1].vel = jumpDir * 8f;
                 self.canJump = 0;
                 DetachPlayerFromSilk(self);
@@ -277,22 +305,18 @@ namespace tinker.Silk
             int dy = self.input[0].y;
             if (dy != 0)
             {
-                float climbSpeed = self.slugcatStats.poleClimbSpeedFac * 1.7f;
+                float climbSpeed = self.slugcatStats.poleClimbSpeedFac * 1.8f;
                 Vector2 segStart = silk.GetPointOnSegment(state.SegmentIndex, 0f);
                 Vector2 segEnd = silk.GetPointOnSegment(state.SegmentIndex, 1f);
-
-                int upSign = segEnd.y > segStart.y ? 1 : -1;
-
+                int upSign = (segEnd.y - segStart.y) >= 0 ? 1 : -1;
                 float segmentLength = Vector2.Distance(segStart, segEnd);
-                float deltaT = (segmentLength > 0.1f) ? climbSpeed * dy * upSign / segmentLength : 0f;
+                float deltaT = (segmentLength > 0.1f) ? (climbSpeed * dy * upSign) / segmentLength : 0f;
                 state.T += deltaT;
                 UpdateSegment(state, silk);
-
                 Vector2 move = (segEnd - segStart).normalized * climbSpeed * dy * upSign;
                 self.bodyChunks[0].pos += move;
                 self.bodyChunks[1].pos += move;
             }
-
             AlignPlayerToPoint(self, state.smoothedAttachPoint, state);
         }
 
@@ -314,9 +338,9 @@ namespace tinker.Silk
 
             if (self.input[0].jmp && !self.input[1].jmp)
             {
-                Vector2 jumpDir = (Vector2.up * (state.IsHanging ? -0.8f : 1f) + tangent * self.input[0].x).normalized;
+                Vector2 jumpDir = (Vector2.up * (state.IsHanging ? -0.5f : 1.1f) + tangent * self.input[0].x).normalized;
                 self.jumpBoost = 6f;
-                self.bodyChunks[0].vel = jumpDir * 9f;
+                self.bodyChunks[0].vel = jumpDir * 9.5f;
                 self.bodyChunks[1].vel = jumpDir * 8f;
                 self.canJump = 0;
                 DetachPlayerFromSilk(self);
@@ -327,7 +351,7 @@ namespace tinker.Silk
             if (dx != 0)
             {
                 float moveDirection = (Vector2.Dot(tangent, Vector2.right) < 0) ? -dx : dx;
-                float climbSpeed = self.slugcatStats.poleClimbSpeedFac * 1.5f * moveDirection;
+                float climbSpeed = self.slugcatStats.poleClimbSpeedFac * 1.6f * moveDirection;
                 Vector2 segStart = silk.GetPointOnSegment(state.SegmentIndex, 0f);
                 Vector2 segEnd = silk.GetPointOnSegment(state.SegmentIndex, 1f);
                 float segmentLength = Vector2.Distance(segStart, segEnd);
@@ -336,10 +360,10 @@ namespace tinker.Silk
                 UpdateSegment(state, silk);
             }
 
-            self.bodyChunks[0].vel.y -= self.gravity;
-            self.bodyChunks[1].vel.y -= self.gravity;
-            self.bodyChunks[0].vel.x *= 0.9f;
-            self.bodyChunks[1].vel.x *= 0.9f;
+            self.bodyChunks[0].vel.y -= self.gravity * 0.5f;
+            self.bodyChunks[1].vel.y -= self.gravity * 0.5f;
+            self.bodyChunks[0].vel.x *= 0.85f;
+            self.bodyChunks[1].vel.x *= 0.85f;
 
             AlignPlayerToPoint(self, state.smoothedAttachPoint, state);
         }
@@ -349,24 +373,24 @@ namespace tinker.Silk
             float bodyDist = player.bodyChunkConnections[0].distance;
             if (state.CurrentClimbMode == ClimbMode.HorizontalClimb)
             {
-                Vector2 feetPos = point;
                 if (state.IsHanging)
                 {
-                    player.bodyChunks[0].pos = Vector2.Lerp(player.bodyChunks[0].pos, feetPos, 0.4f);
-                    player.bodyChunks[1].pos = Vector2.Lerp(player.bodyChunks[1].pos, feetPos - new Vector2(0f, bodyDist), 0.4f);
+                    player.bodyChunks[0].pos = Vector2.Lerp(player.bodyChunks[0].pos, point + Vector2.down * 2f, 0.4f);
+                    player.bodyChunks[1].pos = Vector2.Lerp(player.bodyChunks[1].pos, point + Vector2.down * (bodyDist + 2f), 0.3f);
                 }
                 else
                 {
-                    player.bodyChunks[1].pos = Vector2.Lerp(player.bodyChunks[1].pos, feetPos, 0.8f);
-                    player.bodyChunks[0].vel.y += player.gravity;
+                    player.bodyChunks[1].pos = Vector2.Lerp(player.bodyChunks[1].pos, point, 0.7f);
+                    player.bodyChunks[0].vel.y += player.gravity * 0.8f;
                 }
             }
             else
             {
-                player.bodyChunks[0].pos.x = point.x;
-                player.bodyChunks[1].pos.x = point.x;
-                player.bodyChunks[0].pos.y = Mathf.Lerp(player.bodyChunks[0].pos.y, point.y, 0.9f);
-                player.bodyChunks[1].pos.y = Mathf.Lerp(player.bodyChunks[1].pos.y, point.y - bodyDist, 0.9f);
+                float xBias = 0.5f;
+                player.mainBodyChunk.pos.x = Mathf.Lerp(player.mainBodyChunk.pos.x, point.x, xBias);
+                player.bodyChunks[1].pos.x = Mathf.Lerp(player.bodyChunks[1].pos.x, point.x, xBias * 0.8f);
+                player.bodyChunks[0].pos.y = Mathf.Lerp(player.bodyChunks[0].pos.y, point.y, 0.8f);
+                player.bodyChunks[1].pos.y = Mathf.Lerp(player.bodyChunks[1].pos.y, point.y - bodyDist, 0.7f);
             }
         }
 
@@ -388,7 +412,6 @@ namespace tinker.Silk
         {
             float dt = 0.05f;
             Vector2 p0, p1;
-
             if (t < dt && segIndex > 0)
             {
                 p0 = silk.GetPointOnSegment(segIndex - 1, 1f - (dt - t));
@@ -404,7 +427,6 @@ namespace tinker.Silk
                 p0 = silk.GetPointOnSegment(segIndex, Mathf.Clamp01(t - dt));
                 p1 = silk.GetPointOnSegment(segIndex, Mathf.Clamp01(t + dt));
             }
-
             Vector2 tangent = p1 - p0;
             if (tangent.sqrMagnitude < 1e-4f)
             {
@@ -430,8 +452,7 @@ namespace tinker.Silk
                     if (t.verticalBeam || t.horizontalBeam)
                     {
                         Vector2 polePos = player.room.MiddleOfTile(tile.x + dx, tile.y + dy);
-                        if (Vector2.Distance(player.mainBodyChunk.pos, polePos) < range)
-                            return true;
+                        if (Vector2.Distance(player.mainBodyChunk.pos, polePos) < range) return true;
                     }
                 }
             }

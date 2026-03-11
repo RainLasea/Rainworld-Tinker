@@ -3,18 +3,19 @@ abysslasea.tinker-name|巧匠
 abysslasea.tinker-description|一位迷茫的追寻者...
 
 Abilities|能力
+Appearance|外观
+Misc|其他
+
 ABILITIES|能力
-Customize and toggle the innate powers of the Tinker.|自由配置与开关 Tinker 的固有能力。
+Customize and toggle the innate powers of the Tinker.|自由配置与开关 巧匠 的固有能力。
 Enable Mouse Aim Throw|启用鼠标瞄准投掷
 Enable Night Vision|开启夜视效果
 Silk Shoot Key|蛛丝射出按键
 
-Appearance|外观
 APPEARANCE|外观
-Visual and cosmetic settings for the Tinker.|Tinker 的视觉与外观自定义设置。
+Visual and cosmetic settings for the Tinker.|巧匠 的视觉与外观自定义设置。
 Enable Antenna Rendering|启用触角渲染
 
-Misc|其他
 MISC|其他
 Extra settings|额外的设置
 Enable Demo Version Hint|启用 Demo 版本提示
