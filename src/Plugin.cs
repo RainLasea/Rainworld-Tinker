@@ -68,6 +68,10 @@ namespace tinker
             orig(self);
             if (_isInit) return;
             _isInit = true;
+
+            //Tinker.AncientBot.GenerateKeyDrone.RegisterValues();
+            //Tinker.AncientBot.GenerateKeyDrone.ApplyHooks();
+
             try
             {
                 string path = AssetManager.ResolveFilePath("shaders/nvshader/nvshader");

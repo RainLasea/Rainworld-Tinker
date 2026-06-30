@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Tinker.Silk.Bridge;
 using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
@@ -123,56 +124,171 @@ namespace tinker.Silk
 
         private static void Player_Update_Input(On.Player.orig_Update orig, Player self, bool eu)
         {
-            orig(self, eu);
-            if (self.room == null || self.dead) return;
+            // ═══════════════════════════════════════════════════
+            // PHASE 1: BEFORE orig() — Apply continuous physics forces
+            // Forces applied here WILL be processed by the game's collision/physics
+            // ═══════════════════════════════════════════════════
+            bool isTinker = IsTinkerPlayer(self);
+            if (isTinker && self.room != null && !self.dead)
+            {
+                SilkPhysics silk = tinkerSilkData.Get(self);
+                if (silk.Attached && !(SilkBridgeManager.GetBridgeModeState(self)?.animating == true))
+                {
+                    // Use self.input[1] (previous frame input) for continuous forces
+                    // self.input[0] is not set yet — game sets it inside orig()
+                    ApplyContinuousPhysicsForces(self, silk);
+                }
+            }
 
-            bool isTinker = self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
+            orig(self, eu);
+
+            // ═══════════════════════════════════════════════════
+            // PHASE 2: AFTER orig() — Input detection & state changes
+            // self.input[0] is now populated with current frame's input
+            // ═══════════════════════════════════════════════════
+            if (self.room == null || self.dead) return;
             if (!isTinker) return;
 
             int playerNum = self.playerState?.playerNumber ?? -1;
             if (playerNum < 0) return;
 
-            SilkPhysics silk = tinkerSilkData.Get(self);
+            SilkPhysics silk2 = tinkerSilkData.Get(self);
+            var bridgeState = SilkBridgeManager.GetBridgeModeState(self);
 
+            // Track room changes — release silk on room transition
+            TrackRoomChange(self, playerNum, silk2);
+
+            // Read raw mouse/keyboard input for trigger events
+            ReadMouseInputState(playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown, out bool leftMouseDown);
+
+            // Track game input state changes
+            ReadGameInputState(self, playerNum, out bool wasVerticalInput, out bool currentVerticalInput, out bool wasJumping, out bool isJumping);
+
+            bool inBridgeMode = bridgeState?.active == true;
+            bool animationRunning = bridgeState?.animating == true;
+
+            // Update bridge D2 position
+            if (inBridgeMode && silk2.Attached && bridgeState != null)
+                bridgeState.UpdateD2Position(self.room);
+
+            // Bridge mode: activate/deactivate + shoot virtual silk
+            HandleBridgeMode(self, silk2, bridgeState, rightMouseDown, leftMousePressed, inBridgeMode, animationRunning);
+
+            // Vertical input released → lock rope length
+            if (wasVerticalInput && !currentVerticalInput && silk2.Attached)
+            {
+                silk2.idealRopeLength = Mathf.Max(silk2.requestedRopeLength, MIN_ROPE_VISIBLE);
+            }
+
+            // Super jump trigger detection + burst vel applied next frame
+            bool jumpTriggered = isJumping && !wasJumping;
+            HandleSuperJump(self, silk2, jumpTriggered);
+
+            // Shoot or release silk on right mouse press
+            if (rightMousePressed && !inBridgeMode && !animationRunning)
+            {
+                if (silk2.mode == SilkMode.Retracted)
+                    silk2.Shoot(GetMouseAimDirection(self));
+                else if (silk2.Attached)
+                    silk2.Release();
+            }
+
+            // Reel/unreel rope length on vertical input (after orig — only changes rope state)
+            if (silk2.Attached && !animationRunning && silk2.mode == SilkMode.AttachedToTerrain)
+                UpdateRopeLengthOnVerticalInput(self, silk2);
+
+            // Pickup key → detach objects from bridges
+            if (self.input[0].pckp && !self.input[1].pckp)
+            {
+                foreach (var bridge in SilkBridgeManager.GetBridgesInRoom(self.room))
+                {
+                    if (bridge.TryDetachObject(self, out PhysicalObject _))
+                        break;
+                }
+            }
+
+            // Bridge climb attach on y-up near bridge
+            TryAttachToBridge(self, inBridgeMode);
+        }
+
+        private static bool IsTinkerPlayer(Player self)
+        {
+            return self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
+        }
+
+        private static void ApplyContinuousPhysicsForces(Player self, SilkPhysics silk)
+        {
+            // Swing force — based on last frame's input (processed by orig())
+            if (self.input[1].x != 0)
+            {
+                Vector2 toAnchor = (silk.pos - self.bodyChunks[0].pos).normalized;
+                Vector2 perpendicular = PerpendicularVector(toAnchor);
+                float swingForce = self.input[1].x * 0.5f;
+
+                for (int i = 0; i < self.bodyChunks.Length; i++)
+                {
+                    self.bodyChunks[i].vel += perpendicular * swingForce;
+                    if (Mathf.Abs(toAnchor.x) > 0.3f)
+                        self.bodyChunks[i].vel.y -= 0.3f;
+                }
+            }
+
+            // Climb force — based on last frame's input
+            if (self.input[1].y != 0 && silk.mode == SilkMode.AttachedToTerrain)
+            {
+                MovePlayerVertically(self, silk, Mathf.Sign(self.input[1].y));
+            }
+
+            // Super jump burst — reserved for future: apply burst from previous frame's trigger
+            if (pendingSuperJumpBurst.TryGetValue(self, out object _))
+            {
+                // Currently the super jump burst is applied immediately in HandleSuperJump (post-orig).
+                // This pre-orig slot is reserved for burst migration when the one-frame lag
+                // from using input[1] is acceptable.
+                pendingSuperJumpBurst.Remove(self);
+            }
+        }
+
+        private static readonly ConditionalWeakTable<Player, object> pendingSuperJumpBurst = new ConditionalWeakTable<Player, object>();
+
+        private static void TrackRoomChange(Player self, int playerNum, SilkPhysics silk)
+        {
             lastPlayerRoom.TryGetValue(playerNum, out Room lastRoom);
             if (lastRoom != self.room)
             {
                 if (silk.Attached)
-                {
                     silk.Release(true);
-                }
                 lastPlayerRoom[playerNum] = self.room;
             }
+        }
 
-            var bridgeState = SilkBridgeManager.GetBridgeModeState(self);
-
-            bool rightMouseDown = Input.GetKey(Options_Hook.SilkShootKey);
-            bool leftMouseDown = Input.GetMouseButton(0);
+        private static void ReadMouseInputState(int playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown, out bool leftMouseDown)
+        {
+            rightMouseDown = Input.GetKey(Options_Hook.SilkShootKey);
+            leftMouseDown = Input.GetMouseButton(0);
             bool wasRightMouseDown = rightMouseDownLastFrame.GetValueOrDefault(playerNum);
             bool wasLeftMouseDown = leftMouseDownLastFrame.GetValueOrDefault(playerNum);
 
             rightMouseDownLastFrame[playerNum] = rightMouseDown;
             leftMouseDownLastFrame[playerNum] = leftMouseDown;
 
-            bool rightMousePressed = rightMouseDown && !wasRightMouseDown;
-            bool leftMousePressed = leftMouseDown && !wasLeftMouseDown;
+            rightMousePressed = rightMouseDown && !wasRightMouseDown;
+            leftMousePressed = leftMouseDown && !wasLeftMouseDown;
+        }
 
-            bool wasVerticalInput = verticalInputLastFrame.GetValueOrDefault(playerNum);
-            bool currentVerticalInput = self.input[0].y != 0;
+        private static void ReadGameInputState(Player self, int playerNum, out bool wasVerticalInput, out bool currentVerticalInput, out bool wasJumping, out bool isJumping)
+        {
+            wasVerticalInput = verticalInputLastFrame.GetValueOrDefault(playerNum);
+            currentVerticalInput = self.input[0].y != 0;
             verticalInputLastFrame[playerNum] = currentVerticalInput;
 
-            bool wasJumping = jumpLastFrame.GetValueOrDefault(playerNum);
-            bool isJumping = self.input[0].jmp;
+            wasJumping = jumpLastFrame.GetValueOrDefault(playerNum);
+            isJumping = self.input[0].jmp;
             jumpLastFrame[playerNum] = isJumping;
+        }
 
-            bool inBridgeMode = bridgeState?.active == true;
-            bool animationRunning = bridgeState?.animating == true;
-
-            if (inBridgeMode && silk.Attached && bridgeState != null)
-            {
-                bridgeState.UpdateD2Position(self.room);
-            }
-
+        private static void HandleBridgeMode(Player self, SilkPhysics silk, BridgeModeState bridgeState, bool rightMouseDown, bool leftMousePressed, bool inBridgeMode, bool animationRunning)
+        {
             if (silk.Attached && rightMouseDown && bridgeState != null)
             {
                 if (!bridgeState.active)
@@ -205,119 +321,71 @@ namespace tinker.Silk
             {
                 bridgeState.Deactivate();
             }
+        }
 
-            if (wasVerticalInput && !currentVerticalInput && silk.Attached)
+        private static void HandleSuperJump(Player self, SilkPhysics silk, bool jumpTriggered)
+        {
+            if (!jumpTriggered || !silk.Attached) return;
+
+            const int TRIGGER_WINDOW = 6;
+
+            if (silk.attachedTime <= TRIGGER_WINDOW)
             {
-                silk.idealRopeLength = silk.requestedRopeLength;
-                if (silk.idealRopeLength < MIN_ROPE_VISIBLE)
-                    silk.idealRopeLength = MIN_ROPE_VISIBLE;
+                silk.superJumpTimer = 5;
+                silk.superJumpBaseLength = Vector2.Distance(self.mainBodyChunk.pos, silk.pos);
+                Vector2 toAnchor = (silk.pos - self.mainBodyChunk.pos).normalized;
+                Vector2 burstVel = Vector2.up * 10f + toAnchor * 6f;
+
+                // Note: vel modification after orig() is a design tradeoff.
+                // The burst is a one-frame impulse that primarily goes upward,
+                // so the collision risk is minimal (upward through air).
+                // The game's gravity + collision next frame will correct any issues.
+                for (int i = 0; i < self.bodyChunks.Length; i++)
+                    self.bodyChunks[i].vel += burstVel;
+                self.jumpBoost += 2f;
             }
-
-            bool jumpTriggered = isJumping && !wasJumping;
-
-            if (jumpTriggered && silk.Attached)
+            else
             {
-                const int TRIGGER_WINDOW = 6;
+                silk.Release();
+            }
+        }
 
-                if (silk.attachedTime <= TRIGGER_WINDOW)
-                {
-                    silk.superJumpTimer = 5;
-                    silk.superJumpBaseLength = Vector2.Distance(self.mainBodyChunk.pos, silk.pos);
-                    Vector2 toAnchor = (silk.pos - self.mainBodyChunk.pos).normalized;
-                    Vector2 burstVel = Vector2.up * 10f + toAnchor * 6f;
+        private static void UpdateRopeLengthOnVerticalInput(Player self, SilkPhysics silk)
+        {
+            if (self.input[0].y > 0)
+            {
+                float currentDist = Vector2.Distance(self.bodyChunks[0].pos, silk.pos);
+                const float REEL_STEP = 4f;
+                silk.idealRopeLength = Mathf.Clamp(silk.idealRopeLength - REEL_STEP, MIN_ROPE_VISIBLE, Mathf.Max(currentDist, MIN_ROPE_VISIBLE));
+                if (silk.requestedRopeLength < MIN_ROPE_VISIBLE)
+                    silk.requestedRopeLength = MIN_ROPE_VISIBLE;
+            }
+            else if (self.input[0].y < 0)
+            {
+                const float UNREEL_STEP = 4f;
+                silk.idealRopeLength = Mathf.Clamp(silk.idealRopeLength + UNREEL_STEP, MIN_ROPE_VISIBLE, 800f);
+            }
+        }
 
-                    for (int i = 0; i < self.bodyChunks.Length; i++)
-                    {
-                        self.bodyChunks[i].vel += burstVel;
-                    }
-                    self.jumpBoost += 2f;
-                }
-                else
-                {
-                    silk.Release();
-                }
+        private static void TryAttachToBridge(Player self, bool inBridgeMode)
+        {
+            if (inBridgeMode || SilkClimb.IsClimbing(self) || !self.Consious || self.bodyMode == Player.BodyModeIndex.CorridorClimb)
                 return;
-            }
 
-            if (rightMousePressed && !inBridgeMode && !animationRunning)
+            if (self.input[0].y > 0)
             {
-                if (silk.mode == SilkMode.Retracted)
-                    silk.Shoot(GetMouseAimDirection(self));
-                else if (silk.Attached)
-                    silk.Release();
-            }
+                Vector2 checkPos = self.mainBodyChunk.pos + new Vector2(0f, 15f);
+                SilkBridge closestBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, 40f);
 
-            if (silk.Attached && !animationRunning)
-            {
-                bool attachedToTerrain = silk.mode == SilkMode.AttachedToTerrain;
-
-                if (self.input[0].y != 0 && attachedToTerrain)
+                if (closestBridge != null)
                 {
-                    if (self.input[0].y > 0)
-                    {
-                        MovePlayerVertically(self, silk, 1f);
+                    int segIndex;
+                    float t;
+                    closestBridge.GetClosestPoint(checkPos, out segIndex, out t);
 
-                        float currentDist = Vector2.Distance(self.bodyChunks[0].pos, silk.pos);
-                        const float REEL_STEP = 4f;
-                        float upperBound = Mathf.Max(currentDist, MIN_ROPE_VISIBLE);
-                        silk.idealRopeLength = Mathf.Clamp(silk.idealRopeLength - REEL_STEP, MIN_ROPE_VISIBLE, upperBound);
-
-                        if (silk.requestedRopeLength < MIN_ROPE_VISIBLE)
-                            silk.requestedRopeLength = MIN_ROPE_VISIBLE;
-                    }
-                    else if (self.input[0].y < 0)
-                    {
-                        MovePlayerVertically(self, silk, -1f);
-
-                        const float UNREEL_STEP = 4f;
-                        silk.idealRopeLength = Mathf.Clamp(silk.idealRopeLength + UNREEL_STEP, MIN_ROPE_VISIBLE, 800f);
-                    }
-                }
-
-                if (self.input[0].x != 0)
-                {
-                    Vector2 toAnchor = (silk.pos - self.bodyChunks[0].pos).normalized;
-                    Vector2 perpendicular = PerpendicularVector(toAnchor);
-                    float swingForce = self.input[0].x * 0.5f;
-
-                    for (int i = 0; i < self.bodyChunks.Length; i++)
-                    {
-                        self.bodyChunks[i].vel += perpendicular * swingForce;
-                        if (Mathf.Abs(toAnchor.x) > 0.3f)
-                            self.bodyChunks[i].vel.y -= 0.3f;
-                    }
-                }
-            }
-
-            if (self.input[0].pckp && !self.input[1].pckp)
-            {
-                foreach (var bridge in SilkBridgeManager.GetBridgesInRoom(self.room))
-                {
-                    if (bridge.TryDetachObject(self, out PhysicalObject detachedObj))
-                    {
-                        break;
-                    }
-                }
-            }
-
-            if (!inBridgeMode && !SilkClimb.IsClimbing(self) && self.Consious && self.bodyMode != Player.BodyModeIndex.CorridorClimb)
-            {
-                if (self.input[0].y > 0)
-                {
-                    Vector2 checkPos = self.mainBodyChunk.pos + new Vector2(0f, 15f);
-                    SilkBridge closestBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, 40f);
-
-                    if (closestBridge != null)
-                    {
-                        int segIndex;
-                        float t;
-                        Vector2 closestPoint = closestBridge.GetClosestPoint(checkPos, out segIndex, out t);
-
-                        SilkClimb.AttachPlayerToSilk(self, closestBridge, segIndex, t);
-                        self.Blink(5);
-                        self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 1f, 1f);
-                        return;
-                    }
+                    SilkClimb.AttachPlayerToSilk(self, closestBridge, segIndex, t);
+                    self.Blink(5);
+                    self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 1f, 1f);
                 }
             }
         }

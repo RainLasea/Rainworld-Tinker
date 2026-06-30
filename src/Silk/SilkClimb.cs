@@ -121,13 +121,13 @@ namespace tinker.Silk
 
         private static void Player_UpdateBodyMode(On.Player.orig_UpdateBodyMode orig, Player self)
         {
+            // Always call orig() first — ensures other hooks work correctly
+            // and the game's internal body mode state machine stays consistent
+            orig(self);
+
             if (climbStates.TryGetValue(self, out var state) && (state.Active || state.switching != null))
             {
                 UpdateSilkClimbPhysics(self, state);
-            }
-            else
-            {
-                orig(self);
             }
         }
 

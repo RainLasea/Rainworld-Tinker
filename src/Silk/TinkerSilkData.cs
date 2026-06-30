@@ -124,11 +124,9 @@ namespace tinker.Silk
 
             if (player.playerState.foodInStomach > 0)
             {
-                float missingEnergy = demand - currentEnergy;
-                float foodNeeded = demand / 10f;
-
                 if (player.playerState.foodInStomach >= 1)
                 {
+                    Plugin.Logger?.LogDebug($"[Energy] Insufficient ({currentEnergy}/{demand}), consuming 1 food");
                     player.playerState.foodInStomach -= 1;
                     SetEnergy(player, 100f);
                     AddEnergy(player, -demand);
@@ -137,6 +135,7 @@ namespace tinker.Silk
                 }
             }
 
+            Plugin.Logger?.LogDebug($"[Energy] Request {demand} FAILED (energy={currentEnergy}, food={player.playerState.foodInStomach})");
             return false;
         }
 

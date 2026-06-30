@@ -55,15 +55,13 @@ namespace Tinker.Silk.Bridge
             {
                 foreach (var bridge in bridges)
                 {
-                    if (!bridge.IsActive) continue;
+                    if (!bridge.IsActive || bridge.RenderPoints == null || bridge.RenderPoints.Length < 2) continue;
 
-                    var bridgePath = bridge.GetRenderPath();
-                    if (bridgePath.Count < 2) continue;
-
-                    for (int i = 0; i < bridgePath.Count - 1; i++)
+                    var renderPts = bridge.RenderPoints;
+                    for (int i = 0; i < renderPts.Length - 1; i++)
                     {
-                        Vector2 segStart = bridgePath[i];
-                        Vector2 segEnd = bridgePath[i + 1];
+                        Vector2 segStart = renderPts[i];
+                        Vector2 segEnd = renderPts[i + 1];
 
                         if (SilkBridgeManager.SegmentIntersection(chunk.lastPos, chunk.pos, segStart, segEnd, out Vector2 intersection, out _))
                         {
@@ -86,26 +84,45 @@ namespace Tinker.Silk.Bridge
 
         private static void Room_Update(On.Room.orig_Update orig, Room self)
         {
-            orig(self);
-
-            for (int i = animations.Count - 1; i >= 0; i--)
+            try
             {
-                var anim = animations[i];
-                if (anim.Room != self) continue;
-
-                anim.Update();
-                if (anim.IsFinished)
-                {
-                    anim.Destroy();
-                    animations.RemoveAt(i);
-                }
+                orig(self);
+            }
+            catch
+            {
+                // Other mods' Player.Update hooks may crash; don't let that break our cleanup.
             }
 
-            Room_WeaponSilkCheck(self);
+            try
+            {
+                if (self == null) return;
+                for (int i = animations.Count - 1; i >= 0; i--)
+                {
+                    var anim = animations[i];
+                    if (anim?.Room != self) continue;
+
+                    anim.Update();
+                    if (anim.IsFinished)
+                    {
+                        anim.Destroy();
+                        animations.RemoveAt(i);
+                    }
+                }
+
+                if (self.physicalObjects != null)
+                {
+                    Room_WeaponSilkCheck(self);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[BrokenSilkManager] Room_Update error: {ex}");
+            }
         }
 
         private static void Room_WeaponSilkCheck(Room self)
         {
+            if (self.physicalObjects == null) return;
             var bridges = SilkBridgeManager.GetBridgesInRoom(self);
             if (bridges == null || bridges.Count == 0) return;
 
@@ -156,10 +173,11 @@ namespace Tinker.Silk.Bridge
 
         private static void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed)
         {
+            if (self == null || self.room == null) { orig(self, timeStacker, timeSpeed); return; }
             orig(self, timeStacker, timeSpeed);
             foreach (var anim in animations)
             {
-                if (anim.Room == self.room)
+                if (anim?.Room == self.room)
                 {
                     anim.Draw(self, timeStacker);
                 }

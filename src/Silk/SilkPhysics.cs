@@ -52,19 +52,37 @@ namespace tinker.Silk
 
         public void Update()
         {
-            if ((player.room == null || player.slatedForDeletetion) && Attached) { Release(true); return; }
+            if ((player.room == null || player.slatedForDeletetion) && Attached)
+            {
+                Release(true);
+                return;
+            }
+
             lastPos = pos;
             frameCounter++;
             attachedTime = Attached ? attachedTime + 1 : 0;
+
             switch (mode)
             {
-                case SilkMode.Retracted: UpdateRetracted(); break;
-                case SilkMode.ShootingOut: UpdateShootingOut(); break;
-                case SilkMode.AttachedToTerrain: UpdateAttachedToTerrain(); break;
-                case SilkMode.AttachedToObject: UpdateAttachedToObject(); break;
-                case SilkMode.Retracting: Release(); break;
+                case SilkMode.Retracted:
+                    UpdateRetracted();
+                    break;
+                case SilkMode.ShootingOut:
+                    UpdateShootingOut();
+                    break;
+                case SilkMode.AttachedToTerrain:
+                    UpdateAttachedToTerrain();
+                    break;
+                case SilkMode.AttachedToObject:
+                    UpdateAttachedToObject();
+                    break;
+                case SilkMode.Retracting:
+                    Release();
+                    break;
             }
-            if (mode != SilkMode.Retracted && Attached)
+
+            bool isGenuinelyAttached = (mode == SilkMode.AttachedToTerrain || mode == SilkMode.AttachedToObject) && Attached;
+            if (isGenuinelyAttached)
             {
                 Elasticity();
                 UpdateRopeLength();
@@ -74,7 +92,12 @@ namespace tinker.Silk
 
         public void Shoot(Vector2 direction)
         {
-            if (!tinkerSilkData.RequestEnergy(player, 5f)) return;
+            if (!tinkerSilkData.RequestEnergy(player, 5f))
+            {
+                Plugin.Logger?.LogDebug("[SilkPhysics] Shoot blocked: insufficient energy");
+                return;
+            }
+            Plugin.Logger?.LogDebug($"[SilkPhysics] Shoot direction={direction}, mode={mode}");
             ropeSegmentPoints.Clear();
             segmentLastChanged.Clear();
             segmentBridgeAttachments.Clear();
@@ -88,6 +111,10 @@ namespace tinker.Silk
 
         public void Release(bool instant = false)
         {
+            if (mode != SilkMode.Retracted)
+            {
+                Plugin.Logger?.LogDebug($"[SilkPhysics] Release instant={instant}, was mode={mode}");
+            }
             instantDisappear = instant;
             if (mode != SilkMode.Retracted)
             {
@@ -111,12 +138,15 @@ namespace tinker.Silk
             segmentBridgeAttachments.Clear();
         }
 
+        private List<Vector2> _cachedRopePath = new List<Vector2>(52);
+
         public List<Vector2> GetRopePath()
         {
-            var list = new List<Vector2> { baseChunk.pos };
-            list.AddRange(ropeSegmentPoints);
-            list.Add(pos);
-            return list;
+            _cachedRopePath.Clear();
+            _cachedRopePath.Add(baseChunk.pos);
+            _cachedRopePath.AddRange(ropeSegmentPoints);
+            _cachedRopePath.Add(pos);
+            return _cachedRopePath;
         }
 
         private void ResetState()
@@ -183,6 +213,7 @@ namespace tinker.Silk
 
         private void AttachToTerrain(Vector2 hitPos)
         {
+            Plugin.Logger?.LogDebug($"[SilkPhysics] AttachToTerrain at {hitPos}");
             terrainStuckPos = pos = hitPos;
             vel = Vector2.zero;
             mode = SilkMode.AttachedToTerrain;
@@ -191,6 +222,7 @@ namespace tinker.Silk
 
         private void AttachToBridge(SilkBridge bridge, Vector2 point)
         {
+            Plugin.Logger?.LogDebug($"[SilkPhysics] AttachToBridge");
             attachedBridge = bridge;
             terrainStuckPos = pos = bridge.GetClosestPoint(point, out attachedBridgeSeg, out attachedBridgeT);
             mode = SilkMode.AttachedToTerrain;
@@ -199,6 +231,7 @@ namespace tinker.Silk
 
         private void AttachToObject(PhysicalObject obj)
         {
+            Plugin.Logger?.LogDebug($"[SilkPhysics] AttachToObject: {obj}");
             attachedObject = obj;
             pos = obj.bodyChunks[0].pos;
             mode = SilkMode.AttachedToObject;
@@ -324,10 +357,7 @@ namespace tinker.Silk
             float tMax = Mathf.Min(Mathf.Max(t1, t2), Mathf.Max(t3, t4));
             if (tMax < 0 || tMin > tMax)
             {
-                hitPoint.x = Mathf.Clamp(to.x, rect.left + 0.1f, rect.right - 0.1f);
-                hitPoint.y = Mathf.Clamp(to.y, rect.bottom + 0.1f, rect.top - 0.1f);
-                normal = (from - to).normalized;
-                return true;
+                return false;
             }
             hitPoint = from + dir * Mathf.Clamp01(tMin);
             if (Mathf.Abs(hitPoint.x - rect.left) < 0.1f) normal = Vector2.left;

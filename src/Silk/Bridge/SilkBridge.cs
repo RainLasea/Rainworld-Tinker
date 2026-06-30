@@ -1,5 +1,6 @@
 ﻿using RWCustom;
 using System.Collections.Generic;
+using tinker;
 using UnityEngine;
 
 namespace Tinker.Silk.Bridge
@@ -190,7 +191,9 @@ namespace Tinker.Silk.Bridge
 
             Vector2 sPos = startAnchor.GetWorldPosition();
             Vector2 ePos = endAnchor.GetWorldPosition();
-            
+
+            Plugin.Logger?.LogDebug($"[Bridge] Create from {sPos} to {ePos}, maxLength={maxLength}, nodes={nodeCount}");
+
             InitializePhysicsNodes();
             
             RenderPoints = new Vector2[nodeCount];
@@ -590,12 +593,11 @@ namespace Tinker.Silk.Bridge
 
         public Vector2 GetPointOnSegment(int segIndex, float t)
         {
-            var path = GetRenderPath();
-            if (path.Count < 2) return startPoint;
+            if (RenderPoints == null || RenderPoints.Length < 2) return startPoint;
 
-            segIndex = Mathf.Clamp(segIndex, 0, path.Count - 2);
+            segIndex = Mathf.Clamp(segIndex, 0, RenderPoints.Length - 2);
             t = Mathf.Clamp01(t);
-            return Vector2.Lerp(path[segIndex], path[segIndex + 1], t);
+            return Vector2.Lerp(RenderPoints[segIndex], RenderPoints[segIndex + 1], t);
         }
 
         public bool IsPlayerNearBridge(Player player, float threshold = 20f)
