@@ -1,7 +1,7 @@
 ﻿using RWCustom;
 using System.Reflection;
-using UnityEngine;
 using Tinker.Silk.Bridge;
+using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Mouse
@@ -17,6 +17,12 @@ namespace tinker.Mouse
 
         public static RoomCamera GetCurrentCamera() => currentCamera;
 
+        public static bool IsGamepadActive(Player player)
+        {
+            try { return player != null && player.input[0].gamePad; }
+            catch { return false; }
+        }
+
         public static Vector2 GetAimDirection(Player player)
         {
             var cam = GetCurrentCamera();
@@ -24,8 +30,25 @@ namespace tinker.Mouse
 
             if (cam != null)
             {
-                Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-                aimVector = mouseWorldPos - player.mainBodyChunk.pos;
+                // Check for gamepad aim first
+                bool gamepadActive = IsGamepadActive(player);
+                if (gamepadActive)
+                {
+                    var gpState = GamepadBridgeState.GetOrCreate(player);
+                    if (gpState.aiming)
+                    {
+                        aimVector = gpState.aimWorldPos - player.mainBodyChunk.pos;
+                    }
+                    else
+                    {
+                        aimVector = Vector2.right * player.flipDirection;
+                    }
+                }
+                else
+                {
+                    Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
+                    aimVector = mouseWorldPos - player.mainBodyChunk.pos;
+                }
             }
             else
             {
@@ -80,16 +103,31 @@ namespace tinker.Mouse
                 bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
                 if (isTinker && currentCamera != null)
                 {
-                    Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + currentCamera.pos.x, Futile.mousePosition.y + currentCamera.pos.y);
-                    Vector2 aimVector = (mouseWorldPos - thrownPos).normalized;
+                    Vector2 aimDir;
+
+                    // Gamepad branch: aim at gamepad cursor position
+                    if (IsGamepadActive(player))
+                    {
+                        var gpState = GamepadBridgeState.GetOrCreate(player);
+                        if (gpState.aiming)
+                            aimDir = (gpState.aimWorldPos - thrownPos).normalized;
+                        else
+                            aimDir = new Vector2(player.flipDirection, 0f).normalized;
+                    }
+                    else
+                    {
+                        // Mouse branch: aim at mouse cursor position
+                        Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + currentCamera.pos.x, Futile.mousePosition.y + currentCamera.pos.y);
+                        aimDir = (mouseWorldPos - thrownPos).normalized;
+                    }
 
                     float originalSpeed = weapon.firstChunk.vel.magnitude;
 
                     foreach (BodyChunk bodyChunk in weapon.bodyChunks)
                     {
-                        bodyChunk.vel = aimVector * originalSpeed;
+                        bodyChunk.vel = aimDir * originalSpeed;
                     }
-                    weapon.setRotation = aimVector;
+                    weapon.setRotation = aimDir;
                 }
             }
         }
@@ -102,6 +140,11 @@ namespace tinker.Mouse
             {
                 return inputPackage;
             }
+
+            // ── Gamepad detected: skip keyboard/mouse input injection ──
+            // Trigger input is sampled separately by GamepadInputReader.
+            if (IsGamepadActive(currentPlayer))
+                return inputPackage;
 
             bool isTinker = currentPlayer.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !currentPlayer.isSlugpup;
             if (!isTinker) return inputPackage;

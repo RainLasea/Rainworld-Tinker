@@ -19,6 +19,26 @@ Enable Antenna Rendering|启用触角渲染
 MISC|其他
 Extra settings|额外的设置
 Enable Demo Version Hint|启用 Demo 版本提示
+DualSense Light Color|DualSense 指示灯颜色
+Match DualSense Light to Antenna Base|让 DualSense 指示灯匹配触角根部颜色
+Match the assigned DualSense controller light to Antenna Base color.|让已分配的 DualSense 手柄指示灯匹配触角根部颜色。
+DualSense Light Color Source|DualSense 指示灯颜色来源
+Choose which Tinker color controls the assigned DualSense controller light.|选择用于控制已分配 DualSense 手柄指示灯的巧匠颜色。
+Body|身体
+Eyes|眼睛
+
+Gamepad|手柄
+GAMEPAD|手柄设置
+Input Backend|输入后端
+Controller Profile|手柄类型
+Right Stick Deadzone|右摇杆死区
+Cursor Speed|准星移动速度
+Bridge Hold Time|建桥长按时间
+Choose automatic detection, Rewired raw input, or XInput.|选择自动检测、Rewired 原始输入或 XInput。
+Choose automatic, Xbox, or DualSense controller detection.|选择自动、Xbox 或 DualSense 手柄识别。
+Right stick radial deadzone percentage.|右摇杆径向死区百分比。
+Gamepad cursor speed in world units per second.|手柄准星的世界坐标移动速度。
+How long RT must be held before bridge selection begins.|RT 进入建桥选择前所需的长按时间。
 
 AntennaBase|触角根部
 AntennaTip|触角尖端

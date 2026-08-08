@@ -189,11 +189,6 @@ namespace Tinker.Silk.Bridge
             this.slatedForDeletetion = false;
             this.health = INITIAL_HEALTH;
 
-            Vector2 sPos = startAnchor.GetWorldPosition();
-            Vector2 ePos = endAnchor.GetWorldPosition();
-
-            Plugin.Logger?.LogDebug($"[Bridge] Create from {sPos} to {ePos}, maxLength={maxLength}, nodes={nodeCount}");
-
             InitializePhysicsNodes();
             
             RenderPoints = new Vector2[nodeCount];

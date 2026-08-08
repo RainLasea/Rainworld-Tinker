@@ -41,6 +41,7 @@ namespace tinker.Silk
             leftMouseDownLastFrame.Clear();
             lastPlayerRoom.Clear();
             jumpLastFrame.Clear();
+            GamepadInputReader.Cleanup();
         }
 
         private static void PlayerGraphics_SuckedIntoShortCut(On.PlayerGraphics.orig_SuckedIntoShortCut self, PlayerGraphics selfGraphics, Vector2 shortCutPosition)
@@ -149,6 +150,13 @@ namespace tinker.Silk
             if (self.room == null || self.dead) return;
             if (!isTinker) return;
 
+            // ── Remote player guard ─────────────────────────────
+            // In Rain Meadow multiplayer, remote players use OnlineController.
+            // Their input[0] is synced from the network, but mouse/keyboard/gamepad
+            // reads are LOCAL only. Skip silk input handling for remote players
+            // to prevent local input from accidentally triggering their silk.
+            if (IsRemotePlayer(self)) return;
+
             int playerNum = self.playerState?.playerNumber ?? -1;
             if (playerNum < 0) return;
 
@@ -158,7 +166,12 @@ namespace tinker.Silk
             // Track room changes — release silk on room transition
             TrackRoomChange(self, playerNum, silk2);
 
-            // Read raw mouse/keyboard input for trigger events
+            GamepadSnapshot gamepad = GamepadInputReader.Sample(self, playerNum);
+            var gamepadState = GamepadBridgeState.GetOrCreate(self);
+            gamepadState.gamepadConnected = gamepad.connected;
+            bool usingGamepad = gamepad.connected || gamepad.ltHeld || gamepad.rtHeld || gamepadState.aiming;
+
+            // Read raw mouse/keyboard input for trigger events.
             ReadMouseInputState(playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown, out bool leftMouseDown);
 
             // Track game input state changes
@@ -171,8 +184,17 @@ namespace tinker.Silk
             if (inBridgeMode && silk2.Attached && bridgeState != null)
                 bridgeState.UpdateD2Position(self.room);
 
-            // Bridge mode: activate/deactivate + shoot virtual silk
-            HandleBridgeMode(self, silk2, bridgeState, rightMouseDown, leftMousePressed, inBridgeMode, animationRunning);
+            if (usingGamepad)
+            {
+                HandleGamepadInput(self, silk2, bridgeState, gamepad);
+                inBridgeMode = bridgeState?.active == true;
+                animationRunning = bridgeState?.animating == true;
+            }
+            else
+            {
+                // Bridge mode: activate/deactivate + shoot virtual silk
+                HandleBridgeMode(self, silk2, bridgeState, rightMouseDown, leftMousePressed, inBridgeMode, animationRunning);
+            }
 
             // Vertical input released → lock rope length
             if (wasVerticalInput && !currentVerticalInput && silk2.Attached)
@@ -185,7 +207,7 @@ namespace tinker.Silk
             HandleSuperJump(self, silk2, jumpTriggered);
 
             // Shoot or release silk on right mouse press
-            if (rightMousePressed && !inBridgeMode && !animationRunning)
+            if (!usingGamepad && rightMousePressed && !inBridgeMode && !animationRunning)
             {
                 if (silk2.mode == SilkMode.Retracted)
                     silk2.Shoot(GetMouseAimDirection(self));
@@ -214,6 +236,24 @@ namespace tinker.Silk
         private static bool IsTinkerPlayer(Player self)
         {
             return self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
+        }
+
+        /// <summary>
+        /// Detects if this player is a remote multiplayer player (e.g. from Rain Meadow).
+        /// Remote players use OnlineController — their input[0] is synced over network,
+        /// but local mouse/keyboard input reads are invalid for them.
+        /// </summary>
+        private static bool IsRemotePlayer(Player self)
+        {
+            if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
+            {
+                return RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self);
+            }
+            if (self.controller == null) return false;
+            string controllerType = self.controller.GetType().Name;
+            // Standard vanilla controllers: KeyboardController, JoystickController
+            // Rain Meadow remote controller: OnlineController
+            return controllerType != "KeyboardController" && controllerType != "JoystickController";
         }
 
         private static void ApplyContinuousPhysicsForces(Player self, SilkPhysics silk)
@@ -258,6 +298,8 @@ namespace tinker.Silk
             {
                 if (silk.Attached)
                     silk.Release(true);
+                GamepadBridgeState.GetOrCreate(self).Cancel();
+                SilkBridgeManager.GetBridgeModeState(self)?.Deactivate();
                 lastPlayerRoom[playerNum] = self.room;
             }
         }
@@ -396,6 +438,83 @@ namespace tinker.Silk
             if (cam != null)
                 return new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
             return Vector2.zero;
+        }
+
+        // ── Gamepad input methods ─────────────────────────────────────
+
+        private static void HandleGamepadInput(Player self, SilkPhysics silk, BridgeModeState bridgeState, GamepadSnapshot input)
+        {
+            var gpState = GamepadBridgeState.GetOrCreate(self);
+
+            if (input.ltPressed)
+                gpState.EnterAimMode(self);
+
+            if (gpState.aiming && input.ltHeld)
+                gpState.UpdateAim(input.rightStick);
+
+            if (input.ltReleased && gpState.aiming)
+            {
+                if (gpState.rtHeld || gpState.selectingBridge)
+                {
+                    silk.Release(true);
+                    bridgeState?.Deactivate();
+                }
+                gpState.Cancel(keepGamepadConnected: input.connected);
+                return;
+            }
+
+            if (input.rtPressed && gpState.aiming && silk.mode == SilkMode.Retracted && bridgeState?.animating != true)
+            {
+                gpState.BeginRtPress();
+                silk.ShootAtPosition(gpState.firstTargetWorldPos);
+                return;
+            }
+
+            if (input.rtPressed && silk.Attached && !gpState.selectingBridge)
+            {
+                silk.Release();
+                gpState.ExitAimMode();
+                return;
+            }
+
+            if (input.rtHeld && gpState.rtHeld)
+            {
+                gpState.UpdateRtHold();
+                if (!gpState.selectingBridge && silk.Attached && gpState.rtHoldSeconds >= Options_Hook.GamepadBridgeHoldSeconds)
+                {
+                    if (bridgeState != null)
+                    {
+                        bridgeState.Activate(silk.pos);
+
+                        if (silk.mode == SilkMode.AttachedToTerrain && silk.attachedBridge != null)
+                        {
+                            int segIdx; float t;
+                            silk.attachedBridge.GetClosestPoint(silk.pos, out segIdx, out t);
+                            bridgeState.AttachD2ToBridge(silk.attachedBridge, segIdx, t);
+                        }
+                        else if (silk.mode == SilkMode.AttachedToObject && silk.attachedObject != null)
+                        {
+                            bridgeState.AttachD2ToObject(silk.attachedObject);
+                        }
+                        gpState.BeginBridgeSelection(bridgeState.point2);
+                    }
+                }
+            }
+
+            if (input.rtReleased && gpState.rtHeld)
+            {
+                bool shouldBuild = gpState.selectingBridge && bridgeState?.active == true && !bridgeState.animating;
+                gpState.OnRTRelease();
+
+                if (shouldBuild)
+                {
+                    bridgeState.ShootVirtualSilk(
+                        (gpState.aimWorldPos - bridgeState.point2).normalized,
+                        bridgeState.point2, self.room, gpState.aimWorldPos);
+                    silk.Release();
+                    gpState.selectingBridge = false;
+                }
+            }
         }
     }
 }

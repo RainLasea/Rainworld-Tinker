@@ -87,21 +87,27 @@ namespace tinker.Mouse
                 bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
                 if (!isTinker)
                 {
-                    cursorSprite.isVisible = false;
-                    bridgeAnchorSprite.isVisible = false;
-                    targetPreviewSprite.isVisible = false;
+                    HideAllSprites();
                     return;
                 }
 
-                if (MouseAimSystem.IsMouseAimEnabled())
+                var gpState = Tinker.Silk.Bridge.GamepadBridgeState.GetOrCreate(player);
+                if (gpState.aiming)
                 {
+                    UpdateGamepadCursor(player, gpState);
+                }
+                else if (player.input[0].gamePad || gpState.gamepadConnected)
+                {
+                    HideAllSprites();
+                }
+                else if (MouseAimSystem.IsMouseAimEnabled())
+                {
+                    // Mouse mode: show mouse cursor
                     UpdateCursorPosition(player);
                 }
                 else
                 {
-                    cursorSprite.isVisible = false;
-                    bridgeAnchorSprite.isVisible = false;
-                    targetPreviewSprite.isVisible = false;
+                    HideAllSprites();
                 }
             }
         }
@@ -154,70 +160,17 @@ namespace tinker.Mouse
 
         private static void UpdateTargetPreview(Player player, RoomCamera cam, BridgeModeState bridgeState)
         {
+            Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
+            UpdateTargetPreview(player, cam, bridgeState, mouseWorldPos);
+        }
+
+        private static void UpdateTargetPreview(Player player, RoomCamera cam, BridgeModeState bridgeState, Vector2 targetWorldPos)
+        {
             if (targetPreviewSprite == null || player.room == null) return;
 
-            Vector2 D2 = bridgeState.point2;
-            Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-
-            Vector2 rayDir = mouseWorldPos - D2;
-            float rayLen = Mathf.Min(rayDir.magnitude, 800f);
-            if (rayLen < 0.001f)
+            if (bridgeState.TryGetVirtualSilkPreviewHit(player, targetWorldPos, out Vector2 hitPoint))
             {
-                targetPreviewSprite.isVisible = false;
-                return;
-            }
-            rayDir /= rayDir.magnitude;
-
-            IntVector2? firstSolid = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(player.room, D2, mouseWorldPos);
-            float terrainDist = float.MaxValue;
-            Vector2? terrainPoint = null;
-            if (firstSolid.HasValue)
-            {
-                terrainPoint = GetPreciseTerrainCollisionForPreview(player.room, D2, mouseWorldPos);
-                if (terrainPoint.HasValue)
-                    terrainDist = Vector2.Distance(D2, terrainPoint.Value);
-            }
-
-            var bridges = SilkBridgeManager.GetBridgesInRoom(player.room);
-            var candidates = new System.Collections.Generic.List<(Vector2 point, float dist)>();
-
-            if (bridges != null)
-            {
-                foreach (var b in bridges)
-                {
-                    if (b == null || b.room != player.room) continue;
-                    var path = b.GetRenderPath();
-                    if (path == null || path.Count < 2) continue;
-
-                    for (int i = 0; i < path.Count - 1; i++)
-                    {
-                        Vector2 a = path[i], bpt = path[i + 1];
-                        Vector2 seg = bpt - a, r = D2 - a;
-                        float denom = rayDir.x * seg.y - rayDir.y * seg.x;
-                        if (Mathf.Abs(denom) < 1e-6f) continue;
-
-                        float t = (r.x * seg.y - r.y * seg.x) / denom;
-                        float u = (r.x * rayDir.y - r.y * rayDir.x) / denom;
-                        if (t >= 0f && t <= rayLen && u >= 0f && u <= 1f && t <= terrainDist + 0.001f)
-                        {
-                            Vector2 intersect = D2 + rayDir * t;
-                            candidates.Add((intersect, Vector2.Distance(intersect, mouseWorldPos)));
-                        }
-                    }
-                }
-            }
-
-            if (terrainPoint.HasValue && terrainDist <= rayLen)
-                candidates.Add((terrainPoint.Value, Vector2.Distance(terrainPoint.Value, mouseWorldPos)));
-
-            if (candidates.Count > 0)
-            {
-                float bestDist = float.MaxValue;
-                Vector2 bestPoint = Vector2.zero;
-                foreach (var c in candidates)
-                    if (c.dist < bestDist) { bestDist = c.dist; bestPoint = c.point; }
-
-                Vector2 screenPos = bestPoint - cam.pos;
+                Vector2 screenPos = hitPoint - cam.pos;
                 targetPreviewSprite.x = screenPos.x;
                 targetPreviewSprite.y = screenPos.y;
                 targetPreviewSprite.isVisible = true;
@@ -249,25 +202,71 @@ namespace tinker.Mouse
             }
         }
 
-        private static Vector2? GetPreciseTerrainCollisionForPreview(Room room, Vector2 from, Vector2 to)
+        private static void HideAllSprites()
         {
-            IntVector2? firstSolid = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, to);
-            if (!firstSolid.HasValue) return null;
+            if (cursorSprite != null) cursorSprite.isVisible = false;
+            if (bridgeAnchorSprite != null) bridgeAnchorSprite.isVisible = false;
+            if (targetPreviewSprite != null) targetPreviewSprite.isVisible = false;
+        }
 
-            Vector2 start = from;
-            Vector2 end = to;
+        private static void UpdateGamepadCursor(Player player, GamepadBridgeState gpState)
+        {
+            if (cursorSprite == null) return;
 
-            for (int i = 0; i < 10; i++)
+            var cam = MouseAimSystem.GetCurrentCamera();
+            if (cam == null)
             {
-                Vector2 mid = (start + end) * 0.5f;
-                IntVector2? hit = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(room, from, mid);
-                if (hit.HasValue)
-                    end = mid;
-                else
-                    start = mid;
+                HideAllSprites();
+                return;
             }
 
-            return end;
+            Vector2 screenPos = gpState.aimWorldPos - cam.pos;
+
+            // Gamepad cursor: blue-tinted, slightly smaller
+            cursorSprite.x = screenPos.x;
+            cursorSprite.y = screenPos.y;
+            cursorSprite.alpha = 0.9f;
+            cursorSprite.color = new Color(0.3f, 0.8f, 1f);
+            cursorSprite.scale = 0.85f;
+            cursorSprite.isVisible = true;
+
+            // Bridge anchor preview at the silk's attached position
+            var bridgeState = SilkBridgeManager.GetBridgeModeState(player);
+            bool inBridgeMode = bridgeState != null && bridgeState.active;
+
+            if (inBridgeMode)
+            {
+                Vector2 anchorScreenPos = bridgeState.point2 - cam.pos;
+                bridgeAnchorSprite.x = anchorScreenPos.x;
+                bridgeAnchorSprite.y = anchorScreenPos.y;
+                bridgeAnchorSprite.isVisible = true;
+
+                float pulse = 0.5f + Mathf.Sin(Time.time * 6f) * 0.08f;
+                bridgeAnchorSprite.scale = pulse;
+                bridgeAnchorSprite.alpha = 0.85f + Mathf.Sin(Time.time * 6f) * 0.15f;
+                bridgeAnchorSprite.color = new Color(1f, 0.2f, 0.2f, 1f);
+            }
+            else if (gpState.rtHeld)
+            {
+                // RT held → show target preview at cursor
+                bridgeAnchorSprite.x = screenPos.x;
+                bridgeAnchorSprite.y = screenPos.y;
+                bridgeAnchorSprite.isVisible = true;
+
+                float pulse = 0.6f + Mathf.Sin(Time.time * 8f) * 0.1f;
+                bridgeAnchorSprite.scale = pulse * 0.6f;
+                bridgeAnchorSprite.alpha = 0.7f + Mathf.Sin(Time.time * 8f) * 0.2f;
+                bridgeAnchorSprite.color = new Color(0.3f, 1f, 0.5f);
+            }
+            else
+            {
+                bridgeAnchorSprite.isVisible = false;
+            }
+
+            if (inBridgeMode)
+                UpdateTargetPreview(player, cam, bridgeState, gpState.aimWorldPos);
+            else
+                targetPreviewSprite.isVisible = false;
         }
     }
 }

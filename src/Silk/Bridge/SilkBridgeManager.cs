@@ -153,6 +153,47 @@ namespace Tinker.Silk.Bridge
             hasTarget = false;
         }
 
+        public bool TryGetVirtualSilkPreviewHit(Player player, Vector2 targetPos, out Vector2 hitPoint)
+        {
+            hitPoint = Vector2.zero;
+            if (player?.room == null || !active) return false;
+
+            BridgeModeState preview = new BridgeModeState();
+            preview.Activate(point2);
+            preview.d2AttachedBridge = d2AttachedBridge;
+            preview.d2AttachedObject = d2AttachedObject;
+            preview.ShootVirtualSilk(targetPos - point2, point2, player.room, targetPos);
+
+            const int maxSteps = 30;
+            for (int step = 0; step < maxSteps; step++)
+            {
+                Vector2 lastPos = preview.virtualSilkPos;
+                preview.virtualSilkVel.y -= GRAVITY;
+                preview.virtualSilkPos += preview.virtualSilkVel;
+
+                bool prioritizeTerrain = preview.ShouldPrioritizeTerrainCollision();
+                bool hit = prioritizeTerrain
+                    ? preview.TryHandleTerrainCollision(player, lastPos, preview.virtualSilkPos) ||
+                      preview.TryHandleBeamCollision(player, lastPos) ||
+                      preview.TryHandleObjectCollision(player)
+                    : preview.TryHandleBridgeCollision(player, lastPos) ||
+                      preview.TryHandleTerrainCollision(player, lastPos, preview.virtualSilkPos) ||
+                      preview.TryHandleObjectCollision(player) ||
+                      preview.TryHandleBeamCollision(player, lastPos);
+
+                if (hit)
+                {
+                    hitPoint = preview.targetLD1;
+                    return true;
+                }
+
+                if (Vector2.Dot(Custom.DirVec(preview.point2, preview.virtualSilkPos), preview.virtualSilkVel.normalized) < -0.6f)
+                    return false;
+            }
+
+            return false;
+        }
+
         public void UpdateVirtualSilk(Player player)
         {
             if (player?.room == null)

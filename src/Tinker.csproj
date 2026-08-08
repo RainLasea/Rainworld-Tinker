@@ -5,7 +5,7 @@
     <LangVersion>11</LangVersion>
     <DebugType>portable</DebugType>
     
-    <Version>0.5.1</Version>
+    <Version>0.5.5</Version>
     <Description>The Tinker mod for Rain World</Description>
     <Authors>AbyssLasea</Authors>
 </PropertyGroup>
@@ -39,6 +39,9 @@
           <Private>false</Private>
         </Reference>
         <Reference Include="..\lib\SlugBase.dll">
+          <Private>false</Private>
+        </Reference>
+        <Reference Include="..\lib\Rain Meadow.dll">
           <Private>false</Private>
         </Reference>
         <Reference Include="..\lib\UnityEngine.CoreModule.dll">

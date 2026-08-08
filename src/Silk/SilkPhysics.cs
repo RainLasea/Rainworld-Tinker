@@ -50,8 +50,21 @@ namespace tinker.Silk
         public bool Attached => mode == SilkMode.AttachedToTerrain || mode == SilkMode.AttachedToObject;
         public bool AttachedToItem => mode == SilkMode.AttachedToObject && attachedObject != null;
 
+        /// <summary>
+        /// When true, physics simulation is skipped and position is driven by synced network data.
+        /// Set for remote Tinker players in Rain Meadow multiplayer.
+        /// </summary>
+        public bool isRemote;
+
         public void Update()
         {
+            // Remote/synced mode: skip all physics, positions set externally via PullSilkState
+            if (isRemote)
+            {
+                lastPos = pos;
+                return;
+            }
+
             if ((player.room == null || player.slatedForDeletetion) && Attached)
             {
                 Release(true);
@@ -94,10 +107,8 @@ namespace tinker.Silk
         {
             if (!tinkerSilkData.RequestEnergy(player, 5f))
             {
-                Plugin.Logger?.LogDebug("[SilkPhysics] Shoot blocked: insufficient energy");
                 return;
             }
-            Plugin.Logger?.LogDebug($"[SilkPhysics] Shoot direction={direction}, mode={mode}");
             ropeSegmentPoints.Clear();
             segmentLastChanged.Clear();
             segmentBridgeAttachments.Clear();
@@ -109,12 +120,36 @@ namespace tinker.Silk
             idealRopeLength = MAX_ROPE_LENGTH;
         }
 
+        /// <summary>
+        /// Shoot silk toward a specific world position (gamepad aim).
+        /// Calculates direction and sets ideal rope length to the target distance.
+        /// </summary>
+        public void ShootAtPosition(Vector2 worldPos)
+        {
+            if (!tinkerSilkData.RequestEnergy(player, 5f))
+            {
+                return;
+            }
+
+            Vector2 dir = worldPos - baseChunk.pos;
+            float dist = dir.magnitude;
+            if (dist < 1f)
+            {
+                return;
+            }
+            ropeSegmentPoints.Clear();
+            segmentLastChanged.Clear();
+            segmentBridgeAttachments.Clear();
+
+            ResetState();
+            pos = lastPos = baseChunk.pos;
+            vel = dir / dist * SHOOT_SPEED;
+            mode = SilkMode.ShootingOut;
+            idealRopeLength = Mathf.Min(dist, MAX_ROPE_LENGTH);
+        }
+
         public void Release(bool instant = false)
         {
-            if (mode != SilkMode.Retracted)
-            {
-                Plugin.Logger?.LogDebug($"[SilkPhysics] Release instant={instant}, was mode={mode}");
-            }
             instantDisappear = instant;
             if (mode != SilkMode.Retracted)
             {
@@ -144,7 +179,31 @@ namespace tinker.Silk
         {
             _cachedRopePath.Clear();
             _cachedRopePath.Add(baseChunk.pos);
-            _cachedRopePath.AddRange(ropeSegmentPoints);
+
+            if (ropeSegmentPoints.Count > 0)
+            {
+                // Normal local silk: use physics-simulated rope segments
+                _cachedRopePath.AddRange(ropeSegmentPoints);
+            }
+            else if (isRemote && mode != SilkMode.Retracted)
+            {
+                // Remote synced silk: ropeSegments never populated (physics skipped).
+                // Generate a smooth interpolated path with natural sag for rendering.
+                float dist = Vector2.Distance(baseChunk.pos, pos);
+                if (dist > 5f)
+                {
+                    int pointCount = Mathf.Clamp(Mathf.FloorToInt(dist / 30f), 4, 48);
+                    for (int i = 1; i <= pointCount; i++)
+                    {
+                        float t = i / (float)(pointCount + 1);
+                        // Natural catenary-like sag: max at center, zero at ends
+                        float sag = Mathf.Sin(t * Mathf.PI) * dist * 0.1f;
+                        Vector2 pt = Vector2.Lerp(baseChunk.pos, pos, t) + Vector2.down * sag;
+                        _cachedRopePath.Add(pt);
+                    }
+                }
+            }
+
             _cachedRopePath.Add(pos);
             return _cachedRopePath;
         }
@@ -213,7 +272,6 @@ namespace tinker.Silk
 
         private void AttachToTerrain(Vector2 hitPos)
         {
-            Plugin.Logger?.LogDebug($"[SilkPhysics] AttachToTerrain at {hitPos}");
             terrainStuckPos = pos = hitPos;
             vel = Vector2.zero;
             mode = SilkMode.AttachedToTerrain;
@@ -222,7 +280,6 @@ namespace tinker.Silk
 
         private void AttachToBridge(SilkBridge bridge, Vector2 point)
         {
-            Plugin.Logger?.LogDebug($"[SilkPhysics] AttachToBridge");
             attachedBridge = bridge;
             terrainStuckPos = pos = bridge.GetClosestPoint(point, out attachedBridgeSeg, out attachedBridgeT);
             mode = SilkMode.AttachedToTerrain;
@@ -231,7 +288,6 @@ namespace tinker.Silk
 
         private void AttachToObject(PhysicalObject obj)
         {
-            Plugin.Logger?.LogDebug($"[SilkPhysics] AttachToObject: {obj}");
             attachedObject = obj;
             pos = obj.bodyChunks[0].pos;
             mode = SilkMode.AttachedToObject;

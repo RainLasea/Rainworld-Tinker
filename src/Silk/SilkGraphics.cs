@@ -12,6 +12,7 @@ namespace tinker.Silk
         private TriangleMesh lineMesh;
         private FSprite tensionIndicator;
         private FSprite pullIndicator;
+        public bool IsSpritesInitiated => spritesInitiated;
         private bool spritesInitiated;
         private RoomCamera currentCamera;
 
@@ -70,7 +71,6 @@ namespace tinker.Silk
             pullIndicator.alpha = 0f;
 
             AddToContainer(rCam.ReturnFContainer("Midground"));
-
             spritesInitiated = true;
         }
 
@@ -97,12 +97,13 @@ namespace tinker.Silk
             }
         }
 
-        public void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
+        /// <returns>true if sprites were actually drawn, false if hidden</returns>
+        public bool DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
             if (!spritesInitiated || player == null || player.slatedForDeletetion || silk == null)
             {
                 HideAllSprites();
-                return;
+                return false;
             }
 
             if (silk.superJumpTimer > 0)
@@ -153,6 +154,7 @@ namespace tinker.Silk
             UpdatePullIndicator(silkTipPos, camPos);
             lastDrawnMode = silk.mode;
             if (shootAnimFrames > 0) shootAnimFrames--;
+            return true;
         }
 
         private void UpdateUmbilicalStyleMesh(List<Vector2> path, float timeStacker, Vector2 camPos)

@@ -1,5 +1,4 @@
 ﻿using BepInEx;
-using BepInEx.Logging;
 using HarmonyLib;
 using SlugBase.DataTypes;
 using SlugBase.Features;
@@ -15,22 +14,21 @@ using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker
 {
-    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.5.1")]
+    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.5.5")]
     public class Plugin : BaseUnityPlugin
     {
         public const string MOD_ID = "abysslasea.tinker";
         public static SlugcatStats.Name SlugName = new SlugcatStats.Name("tinker", false);
         public static Plugin Instance;
-        public static new ManualLogSource Logger;
         public static readonly PlayerFeature<PlayerColor> AntennaBaseColor = PlayerCustomColor("AntennaBase");
         public static readonly PlayerFeature<PlayerColor> AntennaTipColor = PlayerCustomColor("AntennaTip");
+
         private Harmony _harmony;
         private bool _isInit = false;
 
         public void OnEnable()
         {
             Instance = this;
-            Logger = base.Logger;
             _harmony = new Harmony("abysslasea.tinker");
             _harmony.PatchAll();
             On.RainWorld.OnModsInit += RainWorld_OnModsInit_LoadResources;
@@ -69,6 +67,19 @@ namespace tinker
             if (_isInit) return;
             _isInit = true;
 
+            if (tinker.Silk.RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
+            {
+                try
+                {
+                    RainMeadow.OnlineState.RegisterState(typeof(tinker.Silk.RainMeadow.TinkerSilkEntityData.TinkerSilkEntityDataState));
+                }
+                catch (System.Exception)
+                {
+                }
+            }
+
+            OptionalImprovedInput.Initialize();
+
             //Tinker.AncientBot.GenerateKeyDrone.RegisterValues();
             //Tinker.AncientBot.GenerateKeyDrone.ApplyHooks();
 
@@ -100,9 +111,8 @@ namespace tinker
                     }
                 }
             }
-            catch (System.Exception ex)
+            catch (System.Exception)
             {
-                Logger.LogError("Failed to load SilkJarWave Shader: " + ex.Message);
             }
 
             Futile.atlasManager.LoadAtlas("atlases/tinker_face");
@@ -124,6 +134,7 @@ namespace tinker
             {
                 bool shouldEnableMouseAim = Options_Hook.MouseAimEnabled;
                 MouseAimSystem.SetMouseAimEnabled(shouldEnableMouseAim, self);
+                TheTinker.UpdateDualSenseLight(self);
             }
         }
         private void HUD_InitSinglePlayerHud(On.HUD.HUD.orig_InitSinglePlayerHud orig, HUD.HUD self, RoomCamera cam)
