@@ -1,4 +1,4 @@
-﻿using RWCustom;
+using RWCustom;
 using System.Collections.Generic;
 using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
@@ -57,8 +57,8 @@ namespace Tinker.Silk.Bridge
                 {
                     if (!bridge.IsActive || bridge.RenderPoints == null || bridge.RenderPoints.Length < 2) continue;
 
-                    var renderPts = bridge.RenderPoints;
-                    for (int i = 0; i < renderPts.Length - 1; i++)
+                    var renderPts = bridge.GetRenderPath();
+                    for (int i = 0; i < renderPts.Count - 1; i++)
                     {
                         Vector2 segStart = renderPts[i];
                         Vector2 segEnd = renderPts[i + 1];
@@ -84,14 +84,8 @@ namespace Tinker.Silk.Bridge
 
         private static void Room_Update(On.Room.orig_Update orig, Room self)
         {
-            try
-            {
-                orig(self);
-            }
-            catch
-            {
-                // Other mods' Player.Update hooks may crash; don't let that break our cleanup.
-            }
+            // Preserve the game's exception handling and other mods' diagnostics.
+            orig(self);
 
             try
             {
@@ -146,7 +140,6 @@ namespace Tinker.Silk.Bridge
                                 if (SilkBridgeManager.SegmentIntersection(chunk.lastPos, chunk.pos, path[i], path[i + 1], out Vector2 intersection, out _))
                                 {
                                     bridge.TakeDamage(bridge.health + 1f, intersection);
-                                    TriggerBreakAnimation(path, self, intersection);
                                     goto next_weapon;
                                 }
                             }

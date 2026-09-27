@@ -1,4 +1,4 @@
-﻿using RWCustom;
+using RWCustom;
 using System;
 using tinker;
 using UnityEngine;
@@ -65,14 +65,7 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
-            if (!enabled || !Options_Hook.AntennaRenderEnabled)
-            {
-                leftAntenna?.RemoveSprites();
-                rightAntenna?.RemoveSprites();
-                leftMiniAntenna?.RemoveSprites();
-                rightMiniAntenna?.RemoveSprites();
-                return;
-            }
+            if (!enabled) return;
             leftAntenna?.DrawSprites(sLeaser, rCam, timeStacker, camPos);
             rightAntenna?.DrawSprites(sLeaser, rCam, timeStacker, camPos);
             leftMiniAntenna?.DrawSprites(sLeaser, rCam, timeStacker, camPos);
@@ -143,15 +136,11 @@ namespace Tinker.PlayerGraphics_Hooks
         private bool isLeft;
         private float angleOffset;
 
-        private TriangleMesh antennaMesh;
-        private bool spritesInitiated;
-        private bool addedToContainer;
-        private FContainer currentContainer;
+        private readonly LeaserSprites sprites = new();
 
         protected Vector2[] currentPoints;
         protected Vector2[] idealPoints;
         protected Vector2[] velocities;
-        private RoomCamera currentCamera;
 
         private float zOffset = 0f;
         private Vector2 tipVel;
@@ -164,9 +153,6 @@ namespace Tinker.PlayerGraphics_Hooks
             this.player = player;
             this.isLeft = isLeft;
             this.angleOffset = angleOffset;
-            spritesInitiated = false;
-            addedToContainer = false;
-            currentContainer = null;
             currentPoints = new Vector2[segments + 1];
             idealPoints = new Vector2[segments + 1];
             velocities = new Vector2[segments + 1];
@@ -351,29 +337,6 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public override void InitiateSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam)
         {
-            if (graphics == null || player == null || player.room == null)
-            {
-                RemoveSprites();
-                return;
-            }
-
-            if (spritesInitiated && antennaMesh != null && sLeaser != null)
-            {
-                for (int i = 0; i < sLeaser.sprites.Length; i++)
-                {
-                    if (ReferenceEquals(sLeaser.sprites[i], antennaMesh))
-                    {
-                        var newSprites = new FSprite[sLeaser.sprites.Length - 1];
-                        Array.Copy(sLeaser.sprites, 0, newSprites, 0, i);
-                        Array.Copy(sLeaser.sprites, i + 1, newSprites, i, sLeaser.sprites.Length - i - 1);
-                        sLeaser.sprites = newSprites;
-                        break;
-                    }
-                }
-                RemoveSprites();
-            }
-
-            currentCamera = rCam;
             TriangleMesh.Triangle[] tris = new TriangleMesh.Triangle[segments * 2];
             for (int i = 0; i < segments; i++)
             {
@@ -381,7 +344,7 @@ namespace Tinker.PlayerGraphics_Hooks
                 tris[i * 2] = new TriangleMesh.Triangle(vertIndex, vertIndex + 1, vertIndex + 2);
                 tris[i * 2 + 1] = new TriangleMesh.Triangle(vertIndex + 1, vertIndex + 2, vertIndex + 3);
             }
-            antennaMesh = new TriangleMesh("Futile_White", tris, true);
+            var antennaMesh = new TriangleMesh("Futile_White", tris, true);
             if (antennaMesh.verticeColors == null || antennaMesh.verticeColors.Length != antennaMesh.vertices.Length)
                 antennaMesh.verticeColors = new Color[antennaMesh.vertices.Length];
             antennaMesh.color = Color.white;
@@ -390,59 +353,27 @@ namespace Tinker.PlayerGraphics_Hooks
             {
                 antennaMesh.shader = rCam.game.rainWorld.Shaders["Basic"];
             }
-            if (sLeaser != null)
-            {
-                bool exists = false;
-                for (int i = 0; i < sLeaser.sprites.Length; i++)
-                {
-                    if (ReferenceEquals(sLeaser.sprites[i], antennaMesh)) { exists = true; break; }
-                }
-                if (!exists)
-                {
-                    Array.Resize(ref sLeaser.sprites, sLeaser.sprites.Length + 1);
-                    sLeaser.sprites[sLeaser.sprites.Length - 1] = antennaMesh;
-                }
-            }
-
-            Reset();
-
-            spritesInitiated = true;
-            addedToContainer = false;
-            currentContainer = null;
-            TryAddToContainer(rCam);
+            sprites.Add(sLeaser, antennaMesh);
+            AddToContainer(sLeaser, rCam, null);
         }
 
         public override void DrawSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
-            if (!spritesInitiated || antennaMesh == null || player.room == null) return;
-
-            if (!addedToContainer && rCam != null)
-            {
-                TryAddToContainer(rCam);
-                if (!addedToContainer) return;
-            }
-
+            if (!sprites.TryGet(sLeaser, out var meshes)) return;
+            var antennaMesh = (TriangleMesh)meshes[0];
             FSprite headSprite = sLeaser.sprites[3];
-            if (zOffset < 0)
+            antennaMesh.isVisible = Options_Hook.AntennaRenderEnabled && headSprite.isVisible;
+            antennaMesh.alpha = headSprite.alpha;
+            if (!antennaMesh.isVisible) return;
+            if (antennaMesh.container == headSprite.container)
             {
-                antennaMesh.MoveInFrontOfOtherNode(headSprite);
-                FContainer container = headSprite.container;
-                if (container != null && antennaMesh != null)
-                {
-                    container.RemoveChild(antennaMesh);
-                    int headIndex = container.GetChildIndex(headSprite);
-                    container.AddChildAtIndex(antennaMesh, Math.Max(0, headIndex));
-                }
+                if (zOffset < 0) antennaMesh.MoveBehindOtherNode(headSprite);
+                else antennaMesh.MoveInFrontOfOtherNode(headSprite);
             }
-            else
-            {
-                antennaMesh.MoveInFrontOfOtherNode(headSprite);
-            }
-
-            UpdateAntennaMesh(sLeaser, camPos, timeStacker);
+            UpdateAntennaMesh(antennaMesh, camPos, timeStacker);
         }
 
-        private void UpdateAntennaMesh(RoomCamera.SpriteLeaser sLeaser, Vector2 camPos, float timeStacker)
+        private void UpdateAntennaMesh(TriangleMesh antennaMesh, Vector2 camPos, float timeStacker)
         {
             if (antennaMesh == null || antennaMesh.verticeColors == null) return;
 
@@ -496,66 +427,12 @@ namespace Tinker.PlayerGraphics_Hooks
 
         public override void AddToContainer(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, FContainer container)
         {
-            if (!spritesInitiated) return;
-            TryAddToContainer(rCam);
+            if (!sprites.TryGet(sLeaser, out var meshes)) return;
+            FContainer target = container ?? sLeaser.sprites[3].container ?? rCam.ReturnFContainer("Midground");
+            meshes[0].RemoveFromContainer();
+            target.AddChild(meshes[0]);
         }
 
-        private void TryAddToContainer(RoomCamera rCam)
-        {
-
-            if (rCam == null || antennaMesh == null) return;
-
-            if (antennaMesh.shader == null && rCam.game?.rainWorld?.Shaders != null && rCam.game.rainWorld.Shaders.ContainsKey("Basic"))
-            {
-                antennaMesh.shader = rCam.game.rainWorld.Shaders["Basic"];
-            }
-
-            FContainer targetContainer = rCam.ReturnFContainer("Midground");
-            if (targetContainer == null) return;
-
-
-            if (currentContainer == targetContainer)
-            {
-                addedToContainer = true;
-                return;
-            }
-
-
-            if (currentContainer != null)
-            {
-                try
-                {
-                    antennaMesh.RemoveFromContainer();
-                }
-                catch { }
-            }
-
-
-            try
-            {
-                targetContainer.AddChild(antennaMesh);
-                currentContainer = targetContainer;
-                addedToContainer = true;
-            }
-            catch
-            {
-
-                addedToContainer = false;
-            }
-        }
-
-        public override void RemoveSprites()
-        {
-            if (!spritesInitiated) return;
-            try
-            {
-                antennaMesh?.RemoveFromContainer();
-            }
-            catch { }
-            antennaMesh = null;
-            spritesInitiated = false;
-            addedToContainer = false;
-            currentContainer = null;
-        }
+        public override void RemoveSprites() => sprites.Cleanup();
     }
 }

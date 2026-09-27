@@ -39,7 +39,7 @@ namespace tinker.Silk
             public int switchCooldown;
         }
 
-        private static readonly ConditionalWeakTable<Player, ClimbState> climbStates = new ConditionalWeakTable<Player, ClimbState>();
+        private static ConditionalWeakTable<Player, ClimbState> climbStates = new ConditionalWeakTable<Player, ClimbState>();
 
         private static FieldInfo noGrabCounterField;
 
@@ -75,6 +75,8 @@ namespace tinker.Silk
             state.ClimbTarget = silk;
             state.SegmentIndex = seg;
             state.T = t;
+            silk.ApplyClimbForce(silk.GetPointOnSegment(seg, t),
+                Vector2.ClampMagnitude(player.mainBodyChunk.vel * (player.TotalMass * 0.35f), 8f));
             player.mainBodyChunk.vel *= 0.3f;
 
             state.switching = new SwitchingState
@@ -109,14 +111,60 @@ namespace tinker.Silk
 
         public static void Init()
         {
+            On.Player.UpdateAnimation += Player_UpdateAnimation;
             On.Player.UpdateBodyMode += Player_UpdateBodyMode;
             On.Player.Die += Player_Die;
+        }
+
+        public static void Cleanup()
+        {
+            On.Player.UpdateAnimation -= Player_UpdateAnimation;
+            On.Player.UpdateBodyMode -= Player_UpdateBodyMode;
+            On.Player.Die -= Player_Die;
+            climbStates = new ConditionalWeakTable<Player, ClimbState>();
         }
 
         private static void Player_Die(On.Player.orig_Die orig, Player self)
         {
             DetachPlayerFromSilk(self);
             orig(self);
+        }
+
+        private static void Player_UpdateAnimation(On.Player.orig_UpdateAnimation orig, Player self)
+        {
+            var animation = self.animation;
+            bool climbing = animation == Player.AnimationIndex.ClimbOnBeam;
+            bool standing = animation == Player.AnimationIndex.StandOnBeam;
+            bool hanging = animation == Player.AnimationIndex.HangFromBeam;
+            if ((!climbing && !standing && !hanging) || !IsClimbing(self))
+            {
+                orig(self);
+                return;
+            }
+
+            Vector2 upperPosition = self.bodyChunks[0].pos;
+            Vector2 lowerPosition = self.bodyChunks[1].pos;
+            orig(self);
+            if (!IsClimbing(self)) return;
+
+            // Vanilla beam animations align these coordinates to MiddleOfTile.
+            // On diagonal silk that target jumps at every tile boundary, before
+            // UpdateBodyMode runs our continuous silk alignment. Undo only the
+            // beam alignment axes; retain animation, velocity and along-beam motion.
+            // Terrain collision has already run and its positions are preserved.
+            if (climbing)
+            {
+                self.bodyChunks[0].pos.x = upperPosition.x;
+                self.bodyChunks[1].pos.x = lowerPosition.x;
+            }
+            else if (standing)
+            {
+                self.bodyChunks[1].pos.y = lowerPosition.y;
+            }
+            else
+            {
+                self.bodyChunks[0].pos.y = upperPosition.y;
+            }
         }
 
         private static void Player_UpdateBodyMode(On.Player.orig_UpdateBodyMode orig, Player self)
@@ -185,19 +233,19 @@ namespace tinker.Silk
             Vector2 targetPointOnSilk = silk.GetPointOnSegment(state.SegmentIndex, state.T);
             state.smoothedAttachPoint = Vector2.Lerp(state.smoothedAttachPoint, targetPointOnSilk, 0.4f);
 
-            Vector2 moveDir = (self.mainBodyChunk.pos - state.smoothedAttachPoint);
-            if (moveDir.sqrMagnitude > 1f)
+            if (state.Active && state.switching == null)
             {
+                // Weight persists even when perfectly aligned or standing still.
                 Vector2 force = Vector2.down * self.gravity * self.TotalMass * 1.2f;
-                try { silk.ApplyClimbForce(state.smoothedAttachPoint, force); } catch { }
+                silk.ApplyClimbForce(targetPointOnSilk, force);
             }
         }
 
         private static void UpdateSwitching(Player player, ClimbState state)
         {
-            if (state.switching == null || state.switching.toSilk == null)
+            if (state.switching == null || state.switching.toSilk == null || !state.switching.toSilk.IsActive)
             {
-                state.switching = null;
+                DetachPlayerFromSilk(player);
                 return;
             }
 
@@ -205,6 +253,7 @@ namespace tinker.Silk
             float smoothProgress = Mathf.SmoothStep(0f, 1f, state.switching.Progress);
 
             Vector2 targetPos = state.switching.toSilk.GetPointOnSegment(state.switching.toSeg, state.switching.toT);
+            state.switching.toSilk.ApplyClimbForce(targetPos, Vector2.down * player.gravity * player.TotalMass * 1.2f);
             Vector2 newPos = Vector2.Lerp(state.switching.fromPos, targetPos, smoothProgress);
 
             player.mainBodyChunk.vel *= 0.85f;

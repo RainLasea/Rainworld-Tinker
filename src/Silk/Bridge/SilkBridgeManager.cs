@@ -1,4 +1,4 @@
-﻿using RWCustom;
+using RWCustom;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using tinker.Silk;
@@ -16,6 +16,8 @@ namespace Tinker.Silk.Bridge
         public bool animating;
         public Vector2 targetLD1;
         public bool hasTarget;
+        internal readonly SilkDynamics.LaunchSpring LaunchSpring = new SilkDynamics.LaunchSpring();
+        private Vector2 previousSilkPos;
 
         private SilkBridge attachedBridge = null;
         private int attachedSegIndex = -1;
@@ -41,6 +43,8 @@ namespace Tinker.Silk.Bridge
         {
             active = true;
             point2 = pos;
+            LaunchSpring.Reset();
+            previousSilkPos = virtualSilkPos = pos;
             virtualSilkActive = false;
             animating = false;
             hasTarget = false;
@@ -116,6 +120,7 @@ namespace Tinker.Silk.Bridge
         public void Deactivate()
         {
             active = false;
+            LaunchSpring.Reset();
             point2 = Vector2.zero;
             virtualSilkActive = false;
             animating = false;
@@ -135,7 +140,8 @@ namespace Tinker.Silk.Bridge
             if (room == null) return;
 
             virtualSilkActive = true;
-            virtualSilkPos = startPos;
+            previousSilkPos = virtualSilkPos = startPos;
+            LaunchSpring.Reset(1f);
 
 
             aimTarget = targetPos;
@@ -227,6 +233,8 @@ namespace Tinker.Silk.Bridge
 
             if (virtualSilkActive)
             {
+                previousSilkPos = virtualSilkPos;
+                LaunchSpring.Update();
                 Vector2 lastPos = virtualSilkPos;
                 virtualSilkVel.y -= GRAVITY;
                 virtualSilkPos += virtualSilkVel;
@@ -449,7 +457,8 @@ namespace Tinker.Silk.Bridge
             targetLD1 = hitPoint;
             hasTarget = true;
             animating = true;
-            virtualSilkPos = hitPoint;
+            previousSilkPos = virtualSilkPos = hitPoint;
+            if (!virtualSilkActive) LaunchSpring.Reset();
             virtualSilkActive = false;
         }
 
@@ -461,7 +470,8 @@ namespace Tinker.Silk.Bridge
             targetLD1 = hitPoint;
             hasTarget = true;
             animating = true;
-            virtualSilkPos = hitPoint;
+            previousSilkPos = virtualSilkPos = hitPoint;
+            if (!virtualSilkActive) LaunchSpring.Reset();
             virtualSilkActive = false;
         }
 
@@ -473,11 +483,20 @@ namespace Tinker.Silk.Bridge
             targetLD1 = hitPoint;
             hasTarget = true;
             animating = true;
-            virtualSilkPos = hitPoint;
+            previousSilkPos = virtualSilkPos = hitPoint;
+            if (!virtualSilkActive) LaunchSpring.Reset();
             virtualSilkActive = false;
         }
 
-        public Vector2 GetRenderD1Position() => virtualSilkPos;
+        public Vector2 GetRenderD1Position(float timeStacker = 1f) => Vector2.Lerp(previousSilkPos, virtualSilkPos, timeStacker);
+
+        public Vector2 GetLaunchVisualPoint(float t, float timeStacker)
+        {
+            Vector2 start = GetRenderD1Position(timeStacker);
+            Vector2 delta = point2 - start;
+            Vector2 perpendicular = new Vector2(-delta.y, delta.x).normalized;
+            return Vector2.Lerp(start, point2, t) + perpendicular * LaunchSpring.Offset(t, delta.magnitude, timeStacker);
+        }
 
         public Vector2 GetCurrentD2BridgePos()
         {
@@ -519,14 +538,14 @@ namespace Tinker.Silk.Bridge
             {
                 On.RainWorldGame.ShutDownProcess += RainWorldGame_ShutDownProcess;
                 On.Room.Loaded += Room_Loaded;
-                On.RoomCamera.Update += RoomCamera_Update;
+                On.Room.Update += Room_Update;
             }
 
             public static void Cleanup()
             {
                 On.RainWorldGame.ShutDownProcess -= RainWorldGame_ShutDownProcess;
                 On.Room.Loaded -= Room_Loaded;
-                On.RoomCamera.Update -= RoomCamera_Update;
+                On.Room.Update -= Room_Update;
                 ClearAllBridges();
             }
 
@@ -592,6 +611,7 @@ namespace Tinker.Silk.Bridge
                 }
 
                 SilkBridge bridge = new SilkBridge(anchor1, anchor2, player.room, maxBridgeLength, nodeCount);
+                if (bridgeState != null) bridge.BeginLaunchTightening(bridgeState.LaunchSpring);
                 bridge.Update();
 
                 if (!roomBridges.ContainsKey(player.room))
@@ -603,11 +623,7 @@ namespace Tinker.Silk.Bridge
 
             private static int CalculateNodeCount(float distance)
             {
-                if (distance < 50f) return 3;
-                if (distance < 100f) return 5;
-                if (distance < 200f) return 8;
-                if (distance < 400f) return 12;
-                return 15;
+                return Mathf.Clamp(Mathf.CeilToInt(distance / 24f) + 1, 5, 33);
             }
 
             public static List<SilkBridge> GetBridgesInRoom(Room room)
@@ -768,28 +784,20 @@ namespace Tinker.Silk.Bridge
                     roomBridges[self] = new List<SilkBridge>();
             }
 
-            private static void RoomCamera_Update(On.RoomCamera.orig_Update orig, RoomCamera self)
+            private static void Room_Update(On.Room.orig_Update orig, Room self)
             {
                 orig(self);
-                if (self.room == null) return;
+                if (self.game == null) return;
 
-                if (roomBridges.ContainsKey(self.room))
+                if (roomBridges.ContainsKey(self))
                 {
-                    var bridges = roomBridges[self.room];
-                    for (int i = bridges.Count - 1; i >= 0; i--)
-                    {
-                        var bridge = bridges[i];
-                        bridge.Update();
-                        if (bridge.slatedForDeletetion)
-                        {
-                            bridges.RemoveAt(i);
-                        }
-                    }
+                    var bridges = roomBridges[self];
+                    SilkBridge.UpdateNetwork(bridges);
                 }
 
-                foreach (var player in self.room.game.Players)
+                foreach (var player in self.game.Players)
                 {
-                    if (player?.realizedCreature is Player p)
+                    if (player?.realizedCreature is Player p && p.room == self)
                     {
                         var bridgeState = GetBridgeModeState(p);
 

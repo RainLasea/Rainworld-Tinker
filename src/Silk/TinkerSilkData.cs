@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using UnityEngine;
 
@@ -7,7 +8,8 @@ namespace tinker.Silk
     public static class tinkerSilkData
     {
         private static readonly ConditionalWeakTable<Player, SilkPhysics> physicsTable = new();
-        private static readonly ConditionalWeakTable<Player, SilkGraphics> graphicsTable = new();
+        private static ConditionalWeakTable<RoomCamera.SpriteLeaser, SilkGraphics> graphicsTable = new();
+        private static readonly List<WeakReference<SilkGraphics>> trackedGraphics = new();
         private static readonly ConditionalWeakTable<Player, StrongBox<float>> energyTable = new();
         private static readonly ConditionalWeakTable<Player, StrongBox<bool>> exhaustedTable = new();
 
@@ -56,7 +58,14 @@ namespace tinker.Silk
             return physicsTable.GetValue(player, p => new SilkPhysics(p));
         }
 
-        public static SilkGraphics GetGraphics(Player player) => graphicsTable.GetValue(player, p => new SilkGraphics(p));
+        private static SilkGraphics GetGraphics(Player player, RoomCamera.SpriteLeaser leaser) =>
+            graphicsTable.GetValue(leaser, key =>
+            {
+                var graphics = new SilkGraphics(player);
+                trackedGraphics.RemoveAll(reference => !reference.TryGetTarget(out _));
+                trackedGraphics.Add(new WeakReference<SilkGraphics>(graphics));
+                return graphics;
+            });
 
         public static void Initialize()
         {
@@ -71,6 +80,10 @@ namespace tinker.Silk
 
         public static void Cleanup()
         {
+            foreach (var reference in trackedGraphics)
+                if (reference.TryGetTarget(out var graphics)) graphics.RemoveSprites();
+            trackedGraphics.Clear();
+            graphicsTable = new();
             On.Player.ctor -= PlayerCtor;
             On.Player.Update -= PlayerUpdate;
             On.Player.Destroy -= PlayerDestroy;
@@ -91,11 +104,10 @@ namespace tinker.Silk
             // Silk physics + graphics are NOT created here for remote players (Rain Meadow).
             // Remote Tinker players may not have their slugcat type set yet at ctor time.
             // Silk will be lazily created on first Player.Update when slugcat type is correct.
-            // For local Tinker players, silk is created immediately via the Get/GetGraphics calls.
+            // Local silk physics is created immediately; sprites are created per camera later.
             if (IsTinkerPlayer(self))
             {
                 Get(self);
-                GetGraphics(self);
 
                 // CRITICAL: Attach EntityData for Rain Meadow sync immediately at ctor time.
                 // On the host, the OnlinePhysicalObject map entry is set up by RM before Player.ctor runs.
@@ -114,9 +126,8 @@ namespace tinker.Silk
 
             if (!IsTinkerPlayer(self)) return;
 
-            // Ensure silk and graphics exist for the Tinker player
+            // Ensure silk physics exists for the Tinker player.
             SilkPhysics silk = Get(self);
-            GetGraphics(self);
 
             // Dynamically update remote state every frame
             bool isRemote = CheckIsRemotePlayer(self);
@@ -154,11 +165,9 @@ namespace tinker.Silk
             {
                 return RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self);
             }
-            if (self.controller == null) return false;
-            string controllerType = self.controller.GetType().Name;
-            // Standard vanilla controllers: KeyboardController, JoystickController
-            // Rain Meadow remote controller: OnlineController
-            return controllerType != "KeyboardController" && controllerType != "JoystickController";
+            // Vanilla cutscenes and other mods also provide PlayerController instances.
+            // A custom controller alone is not evidence of remote network ownership.
+            return false;
         }
 
         private static void Player_AddFood(On.Player.orig_AddFood orig, Player self, int add)
@@ -190,6 +199,8 @@ namespace tinker.Silk
 
         public static bool RequestEnergy(Player player, float demand)
         {
+            if (player == null || float.IsNaN(demand) || float.IsInfinity(demand) || demand < 0f)
+                return false;
             float currentEnergy = GetEnergy(player);
 
             if (currentEnergy >= demand)
@@ -198,11 +209,11 @@ namespace tinker.Silk
                 return true;
             }
 
-            if (player.playerState.foodInStomach > 0)
+            if (demand <= 100f && player.playerState.foodInStomach > 0)
             {
                 if (player.playerState.foodInStomach >= 1)
                 {
-                    player.playerState.foodInStomach -= 1;
+                    player.SubtractFood(1);
                     SetEnergy(player, 100f);
                     AddEnergy(player, -demand);
                     SetExhausted(player, true);
@@ -222,117 +233,34 @@ namespace tinker.Silk
         private static void PlayerGraphicsInitiateSprites(On.PlayerGraphics.orig_InitiateSprites orig, PlayerGraphics self, RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam)
         {
             orig(self, sLeaser, rCam);
-            Player player = self.owner as Player;
-            if (!IsPlayerValid(player))
-            {
-                return;
-            }
-
-            bool deferred = false;
-            if (!graphicsTable.TryGetValue(player, out SilkGraphics silkGraphics))
-            {
-                bool isTinker = IsTinkerPlayer(player);
-                bool isRemote = CheckIsRemotePlayer(player);
-
-                if (isTinker || isRemote)
-                {
-                    deferred = true;
-                    silkGraphics = GetGraphics(player);
-                    Get(player); // ensure SilkPhysics exists
-
-                    var silk = Get(player);
-                    if (isRemote)
-                    {
-                        silk.isRemote = true;
-                        bool pulled = false;
-                        if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
-                            pulled = RainMeadow.RainMeadowBridge.PullSilkState(player, silk);
-                    }
-                    else
-                    {
-                        if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
-                            RainMeadow.RainMeadowBridge.AttachSilkData(player);
-                    }
-                }
-            }
-
-            if (silkGraphics != null)
-            {
-                silkGraphics.InitiateSprites(sLeaser, rCam);
-                if (deferred)
-                {
-                    var container = rCam.ReturnFContainer("Midground");
-                    silkGraphics.AddToContainer(container);
-                }
-            }
+            if (self.owner is Player player && IsTinkerPlayer(player))
+                GetGraphics(player, sLeaser).InitiateSprites(sLeaser, rCam);
         }
 
         private static void PlayerGraphicsDrawSprites(On.PlayerGraphics.orig_DrawSprites orig, PlayerGraphics self, RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, float timeStacker, Vector2 camPos)
         {
             orig(self, sLeaser, rCam, timeStacker, camPos);
-            Player player = self.owner as Player;
-            if (!IsPlayerValid(player)) return;
+            if (sLeaser.deleteMeNextFrame || self.owner is not Player player ||
+                player.slatedForDeletetion || player.room != rCam.room || !IsTinkerPlayer(player)) return;
 
-            bool hasGraphics = graphicsTable.TryGetValue(player, out SilkGraphics silkGraphics);
-
-            // Safety fallback: if silk doesn't exist but player IS Tinker, create NOW.
-            if (!hasGraphics)
-            {
-                bool isTinker = IsTinkerPlayer(player);
-                bool isRemote = CheckIsRemotePlayer(player);
-
-                if (isTinker || isRemote)
-                {
-                    silkGraphics = GetGraphics(player);
-                    Get(player);
-
-                    if (isRemote)
-                    {
-                        Get(player).isRemote = true;
-                        if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
-                            RainMeadow.RainMeadowBridge.PullSilkState(player, Get(player));
-                    }
-                    else
-                    {
-                        if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
-                            RainMeadow.RainMeadowBridge.AttachSilkData(player);
-                    }
-
-                    silkGraphics.InitiateSprites(sLeaser, rCam);
-                    silkGraphics.AddToContainer(rCam.ReturnFContainer("Midground"));
-                    hasGraphics = true;
-                }
-            }
-
-            // Render silk for any player that has silk graphics data
-            if (silkGraphics != null)
-            {
-                silkGraphics.DrawSprites(sLeaser, rCam, timeStacker, camPos);
-            }
+            // Remote players may acquire their slugcat type after sprite initialization.
+            var graphics = GetGraphics(player, sLeaser);
+            if (!graphics.IsSpritesInitiated) graphics.InitiateSprites(sLeaser, rCam);
+            graphics.DrawSprites(sLeaser, rCam, timeStacker, camPos);
         }
 
         private static void PlayerGraphicsAddToContainer(On.PlayerGraphics.orig_AddToContainer orig, PlayerGraphics self, RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam, FContainer newContatiner)
         {
             orig(self, sLeaser, rCam, newContatiner);
-            Player player = self.owner as Player;
-            if (!IsPlayerValid(player)) return;
-
-            if (graphicsTable.TryGetValue(player, out SilkGraphics silkGraphics))
-                silkGraphics.AddToContainer(newContatiner);
-        }
-
-        private static bool IsPlayerValid(Player player)
-        {
-            return player != null;
+            if (graphicsTable.TryGetValue(sLeaser, out var graphics))
+                graphics.AddToContainer(sLeaser, newContatiner ?? rCam.ReturnFContainer("Midground"));
         }
 
         private static void CleanupPlayerData(Player player)
         {
-            if (graphicsTable.TryGetValue(player, out SilkGraphics graphics))
-            {
-                graphics.RemoveSprites();
-                graphicsTable.Remove(player);
-            }
+            foreach (var reference in trackedGraphics)
+                if (reference.TryGetTarget(out var graphics) && graphics.player == player)
+                    graphics.RemoveSprites();
             if (physicsTable.TryGetValue(player, out SilkPhysics physics))
                 physicsTable.Remove(player);
 

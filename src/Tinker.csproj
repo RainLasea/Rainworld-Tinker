@@ -8,6 +8,12 @@
     <Version>0.5.5</Version>
     <Description>The Tinker mod for Rain World</Description>
     <Authors>AbyssLasea</Authors>
+
+    <!-- Rain Meadow 联机支持(可选):默认关闭,未安装 Rain Meadow 也能正常运行。
+         安装 Rain Meadow 后,用 dotnet build -p:EnableRainMeadow=true 开启编译。
+         未开启时所有引用 Rain Meadow 类型的代码都会被条件编译排除。 -->
+    <EnableRainMeadow Condition="'$(EnableRainMeadow)' == ''">false</EnableRainMeadow>
+    <DefineConstants Condition="'$(EnableRainMeadow)' == 'true'">$(DefineConstants);RAINMEADOW</DefineConstants>
 </PropertyGroup>
     
     <ItemGroup>
@@ -41,7 +47,7 @@
         <Reference Include="..\lib\SlugBase.dll">
           <Private>false</Private>
         </Reference>
-        <Reference Include="..\lib\Rain Meadow.dll">
+        <Reference Include="..\lib\Rain Meadow.dll" Condition="'$(EnableRainMeadow)' == 'true'">
           <Private>false</Private>
         </Reference>
         <Reference Include="..\lib\UnityEngine.CoreModule.dll">
@@ -113,16 +119,8 @@
       </Reference>
     </ItemGroup>
     
-    <Target Name="GenerateMod" AfterTargets="PostBuildEvent">
-		<ItemGroup>
-			<RemovePlugins Include="../mod/plugins/*.dll" />
-		</ItemGroup>
-		<ItemGroup>
-			<CopyPlugins Include="$(TargetPath)" />
-		</ItemGroup>
-		
-        <Delete Files="@(RemovePlugins)" />
-        <Copy SourceFiles="@(CopyPlugins)" DestinationFolder="../mod/newest/plugins/" />
+    <Target Name="GenerateMod" AfterTargets="Build" Condition="'$(GenerateMod)' != 'false'">
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(MSBuildProjectDirectory)/../mod/newest/plugins/" />
     </Target>
     
 </Project>

@@ -181,6 +181,7 @@ namespace tinker.Mouse
             mouseAimEnabled = false;
             currentPlayer = null;
             currentPlayerNumber = 0;
+            currentCamera = null;
         }
     }
 }

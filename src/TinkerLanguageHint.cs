@@ -13,6 +13,11 @@ namespace Tinker
             On.Menu.MenuScene.ctor += MenuScene_ctor;
         }
 
+        public static void Cleanup()
+        {
+            On.Menu.MenuScene.ctor -= MenuScene_ctor;
+        }
+
         private static void MenuScene_ctor(
             On.Menu.MenuScene.orig_ctor orig,
             Menu.MenuScene self,

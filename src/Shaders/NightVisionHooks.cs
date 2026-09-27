@@ -1,12 +1,21 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Reflection;
+using System;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace tinker.shaders
 {
     public static class NightVisionHooks
     {
-        public static float nvIntensity = 0f;
-        private static FSprite nvOverlay;
+        private sealed class CameraState
+        {
+            public float intensity;
+            public FSprite overlay;
+        }
+
+        private static ConditionalWeakTable<RoomCamera, CameraState> cameraStates = new();
+        private static readonly List<WeakReference<CameraState>> trackedStates = new();
         private static MaterialPropertyBlock _propBlock;
         private static FieldInfo _renderLayerField;
         private static FieldInfo _meshRendererField;
@@ -16,62 +25,75 @@ namespace tinker.shaders
             _propBlock = new MaterialPropertyBlock();
             _renderLayerField = typeof(FFacetNode).GetField("_renderLayer", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
-            On.Player.Update += Player_Update;
+            On.RoomCamera.Update += RoomCamera_Update;
+            On.RainWorldGame.ShutDownProcess += Game_ShutDownProcess;
             On.RoomCamera.DrawUpdate += RoomCamera_DrawUpdate;
         }
 
-        private static void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
+        public static void Cleanup()
         {
-            orig(self, eu);
+            On.RoomCamera.Update -= RoomCamera_Update;
+            On.RoomCamera.DrawUpdate -= RoomCamera_DrawUpdate;
+            On.RainWorldGame.ShutDownProcess -= Game_ShutDownProcess;
+            ClearOverlays();
+        }
 
-            if (self == null || self.room == null || self.room.world == null) return;
+        private static void ClearOverlays()
+        {
+            foreach (var reference in trackedStates)
+                if (reference.TryGetTarget(out var state)) state.overlay?.RemoveFromContainer();
+            trackedStates.Clear();
+            cameraStates = new();
+        }
 
-            if (self.slugcatStats.name == Plugin.SlugName && !self.isSlugpup)
+        private static void Game_ShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame self)
+        {
+            ClearOverlays();
+            orig(self);
+        }
+
+        private static void RoomCamera_Update(On.RoomCamera.orig_Update orig, RoomCamera self)
+        {
+            orig(self);
+            var state = cameraStates.GetValue(self, camera =>
             {
-                bool isStory = self.room.game.IsStorySession;
-                bool inRegion = self.room.world.region != null && self.room.world.region.name == "SH";
-
-                if (isStory && Options_Hook.NightVisionEnabled && inRegion)
-                {
-                    nvIntensity = Mathf.Min(1f, nvIntensity + 0.015f);
-                }
-                else
-                {
-                    nvIntensity = Mathf.Max(0f, nvIntensity - 0.015f);
-                }
-            }
+                var value = new CameraState();
+                trackedStates.RemoveAll(reference => !reference.TryGetTarget(out _));
+                trackedStates.Add(new WeakReference<CameraState>(value));
+                return value;
+            });
+            var player = self.followAbstractCreature?.realizedCreature as Player;
+            bool enabled = player != null && player.room == self.room &&
+                player.slugcatStats.name == Plugin.SlugName && !player.isSlugpup &&
+                self.game.IsStorySession && Options_Hook.NightVisionEnabled &&
+                self.room?.world?.region?.name == "SH";
+            state.intensity = Mathf.MoveTowards(state.intensity, enabled ? 1f : 0f, 0.015f);
         }
 
         private static void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed)
         {
             orig(self, timeStacker, timeSpeed);
-
-            if (nvIntensity <= 0.01f)
+            if (!cameraStates.TryGetValue(self, out var state)) return;
+            if (self.room == null || state.intensity <= 0.01f ||
+                !self.game.rainWorld.Shaders.TryGetValue("TinkerNightVision", out FShader nvShader))
             {
-                if (nvOverlay != null) nvOverlay.isVisible = false;
+                if (state.overlay != null) state.overlay.isVisible = false;
                 return;
             }
+            if (state.overlay == null)
+                state.overlay = new FSprite("Futile_White");
+            if (state.overlay.container == null)
+                self.ReturnFContainer("Foreground").AddChild(state.overlay);
 
-            if (nvOverlay == null || nvOverlay.container == null)
-            {
-                nvOverlay = new FSprite("Futile_White");
-                self.ReturnFContainer("Foreground").AddChild(nvOverlay);
-            }
-
-            if (self.game.rainWorld.Shaders.TryGetValue("TinkerNightVision", out FShader nvShader))
-            {
-                nvOverlay.isVisible = true;
-                nvOverlay.shader = nvShader;
-
-                nvOverlay.SetPosition(self.sSize.x / 2f, self.sSize.y / 2f);
-                nvOverlay.scaleX = self.sSize.x / 16f;
-                nvOverlay.scaleY = self.sSize.y / 16f;
-
-                UpdateShaderParams(nvOverlay);
-            }
+            state.overlay.isVisible = true;
+            state.overlay.shader = nvShader;
+            state.overlay.SetPosition(self.sSize.x / 2f, self.sSize.y / 2f);
+            state.overlay.scaleX = self.sSize.x / 16f;
+            state.overlay.scaleY = self.sSize.y / 16f;
+            UpdateShaderParams(state.overlay, state.intensity);
         }
 
-        private static void UpdateShaderParams(FSprite sprite)
+        private static void UpdateShaderParams(FSprite sprite, float intensity)
         {
             try
             {
@@ -85,7 +107,7 @@ namespace tinker.shaders
                     if (renderer != null)
                     {
                         renderer.GetPropertyBlock(_propBlock);
-                        _propBlock.SetFloat("_Intensity", nvIntensity);
+                        _propBlock.SetFloat("_Intensity", intensity);
                         _propBlock.SetFloat("_Gain", 2.0f);
                         renderer.SetPropertyBlock(_propBlock);
                     }

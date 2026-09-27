@@ -1,4 +1,4 @@
-﻿using RWCustom;
+using RWCustom;
 using System.Collections.Generic;
 using Tinker.Silk.Bridge;
 using Tinker.Silk.Collision;
@@ -34,6 +34,8 @@ namespace tinker.Silk
         private const int MAX_SEGMENTS = 50;
         private readonly ICollisionProvider collisionProvider;
         private int frameCounter;
+        private float pullAcceleration, lastPullAcceleration;
+        private float wavePhase, waveAmplitude, previousWaveAmplitude;
         public int superJumpTimer = 0;
         private float superJumpStartLength;
         private const int SUPER_JUMP_DURATION = 6;
@@ -62,6 +64,7 @@ namespace tinker.Silk
             if (isRemote)
             {
                 lastPos = pos;
+                UpdateVisualMotion();
                 return;
             }
 
@@ -72,6 +75,7 @@ namespace tinker.Silk
             }
 
             lastPos = pos;
+            pullAcceleration = 0f;
             frameCounter++;
             attachedTime = Attached ? attachedTime + 1 : 0;
 
@@ -97,10 +101,11 @@ namespace tinker.Silk
             bool isGenuinelyAttached = (mode == SilkMode.AttachedToTerrain || mode == SilkMode.AttachedToObject) && Attached;
             if (isGenuinelyAttached)
             {
-                Elasticity();
                 UpdateRopeLength();
                 UpdateRopeLogic();
+                Elasticity();
             }
+            UpdateVisualMotion();
         }
 
         public void Shoot(Vector2 direction)
@@ -150,17 +155,19 @@ namespace tinker.Silk
 
         public void Release(bool instant = false)
         {
-            instantDisappear = instant;
             if (mode != SilkMode.Retracted)
             {
+                instantDisappear = instant;
                 mode = SilkMode.Retracted;
             }
+            else if (instant) instantDisappear = true;
         }
 
         public void DetachPhysicsOnly()
         {
             if (!Attached) return;
-            mode = SilkMode.Retracted;
+            // The bridge replaces this strand; it is not a loose discarded rope.
+            Release(true);
             attachedObject = null;
             attachedBridge = null;
             attachedBridgeSeg = -1;
@@ -175,37 +182,53 @@ namespace tinker.Silk
 
         private List<Vector2> _cachedRopePath = new List<Vector2>(52);
 
-        public List<Vector2> GetRopePath()
+        public List<Vector2> GetRopePath(float timeStacker = 1f)
         {
             _cachedRopePath.Clear();
-            _cachedRopePath.Add(baseChunk.pos);
-
-            if (ropeSegmentPoints.Count > 0)
+            Vector2 origin = Vector2.Lerp(baseChunk.lastPos, baseChunk.pos, timeStacker);
+            _cachedRopePath.Add(origin);
+            float pathLength = GetTotalRopeLength();
+            float slack = Attached ? Mathf.Max(0f, requestedRopeLength - pathLength) : 0f;
+            Vector2 from = origin;
+            float amplitude = Mathf.Lerp(previousWaveAmplitude, waveAmplitude, timeStacker);
+            for (int span = 0; span <= ropeSegmentPoints.Count; span++)
             {
-                // Normal local silk: use physics-simulated rope segments
-                _cachedRopePath.AddRange(ropeSegmentPoints);
-            }
-            else if (isRemote && mode != SilkMode.Retracted)
-            {
-                // Remote synced silk: ropeSegments never populated (physics skipped).
-                // Generate a smooth interpolated path with natural sag for rendering.
-                float dist = Vector2.Distance(baseChunk.pos, pos);
-                if (dist > 5f)
+                Vector2 to = span == ropeSegmentPoints.Count ? Vector2.Lerp(lastPos, pos, timeStacker) : ropeSegmentPoints[span];
+                float length = Vector2.Distance(from, to);
+                float spanSlack = slack * length / Mathf.Max(pathLength, 0.001f);
+                float sag = Mathf.Min(0.5f, Mathf.Sqrt(3f * length * spanSlack / 8f));
+                int count = Mathf.Clamp(Mathf.CeilToInt(length / 8f), 2, 64);
+                Vector2 normal = Custom.PerpendicularVector((to - from).normalized);
+                int spanStart = _cachedRopePath.Count;
+                bool blocked = false;
+                Vector2 previous = from;
+                for (int i = 1; i < count; i++)
                 {
-                    int pointCount = Mathf.Clamp(Mathf.FloorToInt(dist / 30f), 4, 48);
-                    for (int i = 1; i <= pointCount; i++)
-                    {
-                        float t = i / (float)(pointCount + 1);
-                        // Natural catenary-like sag: max at center, zero at ends
-                        float sag = Mathf.Sin(t * Mathf.PI) * dist * 0.1f;
-                        Vector2 pt = Vector2.Lerp(baseChunk.pos, pos, t) + Vector2.down * sag;
-                        _cachedRopePath.Add(pt);
-                    }
+                    float t = (float)i / count;
+                    Vector2 point = Vector2.Lerp(from, to, t) + Vector2.down * (4f * t * (1f - t) * sag);
+                    point += normal * SilkDynamics.Wave(t, wavePhase - 0.55f * (1f - timeStacker), amplitude);
+                    if (player.room != null && collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, previous, point).HasValue)
+                    { blocked = true; break; }
+                    _cachedRopePath.Add(point);
+                    previous = point;
                 }
+                if (count > 1 && player.room != null && collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, previous, to).HasValue)
+                    blocked = true;
+                if (blocked) _cachedRopePath.RemoveRange(spanStart, _cachedRopePath.Count - spanStart);
+                _cachedRopePath.Add(to);
+                from = to;
             }
-
-            _cachedRopePath.Add(pos);
             return _cachedRopePath;
+        }
+
+        private void UpdateVisualMotion()
+        {
+            previousWaveAmplitude = waveAmplitude;
+            float motion = (baseChunk.pos - baseChunk.lastPos).magnitude;
+            float pluck = Mathf.Abs(pullAcceleration - lastPullAcceleration) * 0.35f;
+            waveAmplitude = Mathf.Max(waveAmplitude * 0.85f, Mathf.Min(0.25f, pluck * 0.25f + motion * 0.008f));
+            lastPullAcceleration = pullAcceleration;
+            wavePhase = (wavePhase + 0.55f) % (Mathf.PI * 100f);
         }
 
         private void ResetState()
@@ -215,6 +238,7 @@ namespace tinker.Silk
             attachedBridge = null;
             requestedRopeLength = elastic = 0f;
             pullingObject = returning = false;
+            instantDisappear = false;
         }
 
         private void UpdateRetracted() => pos = lastPos = baseChunk.pos;
@@ -262,8 +286,10 @@ namespace tinker.Silk
             for (int i = 0; i < segmentBridgeAttachments.Count; i++)
             {
                 var info = segmentBridgeAttachments[i];
-                if (info?.bridge != null && info.bridge.room == player.room)
+                if (info?.bridge != null && info.bridge.room == player.room && info.bridge.IsActive)
                     ropeSegmentPoints[i] = info.bridge.GetPointOnSegment(info.segIndex, info.t);
+                else if (info != null)
+                    segmentBridgeAttachments[i] = null;
             }
             RemoveUnnecessarySegments();
             AddNecessarySegments();
@@ -305,15 +331,50 @@ namespace tinker.Silk
         private void Elasticity()
         {
             float totalLen = GetTotalRopeLength();
-            if (totalLen > requestedRopeLength)
+            if (totalLen <= requestedRopeLength) return;
+            Vector2 pullDir = (PullPoint - baseChunk.pos).normalized;
+            float outwardSpeed = -Vector2.Dot(baseChunk.vel - PullPointVelocity(), pullDir);
+            float pull = SilkDynamics.PullAcceleration(totalLen - requestedRopeLength, outwardSpeed);
+            pullAcceleration = pull;
+            // Accelerate both chunks together; let vanilla terrain collision run
+            // on the next tick instead of teleporting the player toward the anchor.
+            foreach (BodyChunk chunk in player.bodyChunks) chunk.vel += pullDir * pull;
+            elastic = Mathf.Min(elastic + 0.15f, 0.8f);
+
+            float tension = pull * player.TotalMass;
+            for (int i = 0; i < ropeSegmentPoints.Count; i++)
             {
-                Vector2 target = ropeSegmentPoints.Count > 0 ? ropeSegmentPoints[0] : pos;
-                Vector2 pullDir = (target - baseChunk.pos).normalized;
-                float pull = Mathf.Min((totalLen - requestedRopeLength) * 0.6f, 15f);
-                baseChunk.pos += pullDir * pull;
-                baseChunk.vel -= Vector2.Dot(baseChunk.vel, pullDir) * pullDir * 0.4f;
-                elastic = Mathf.Min(elastic + 0.15f, 0.8f);
+                var contact = segmentBridgeAttachments[i];
+                if (contact?.bridge == null || !contact.bridge.IsActive) continue;
+                Vector2 before = i == 0 ? baseChunk.pos : ropeSegmentPoints[i - 1];
+                Vector2 after = i + 1 == ropeSegmentPoints.Count ? pos : ropeSegmentPoints[i + 1];
+                Vector2 reaction = ((before - ropeSegmentPoints[i]).normalized + (after - ropeSegmentPoints[i]).normalized) * tension;
+                contact.bridge.ApplyForceAt(ropeSegmentPoints[i], reaction, 24f);
             }
+            Vector2 lastPoint = ropeSegmentPoints.Count == 0 ? baseChunk.pos : ropeSegmentPoints[ropeSegmentPoints.Count - 1];
+            Vector2 endForce = (lastPoint - pos).normalized * tension;
+            if (attachedBridge != null && attachedBridge.IsActive)
+                attachedBridge.ApplyForceAt(pos, endForce, 24f);
+            else if (attachedObject != null && attachedObject.TotalMass > 0f)
+            {
+                Vector2 acceleration = Vector2.ClampMagnitude(endForce / attachedObject.TotalMass, 8f);
+                foreach (BodyChunk chunk in attachedObject.bodyChunks) chunk.vel += acceleration;
+            }
+        }
+
+        public Vector2 PullPoint => ropeSegmentPoints.Count > 0 ? ropeSegmentPoints[0] : pos;
+
+        private Vector2 PullPointVelocity()
+        {
+            if (ropeSegmentPoints.Count > 0)
+            {
+                var contact = segmentBridgeAttachments[0];
+                return contact?.bridge != null && contact.bridge.IsActive
+                    ? contact.bridge.GetVelocityOnSegment(contact.segIndex, contact.t) : Vector2.zero;
+            }
+            if (attachedBridge != null && attachedBridge.IsActive)
+                return attachedBridge.GetVelocityOnSegment(attachedBridgeSeg, attachedBridgeT);
+            return attachedObject != null ? attachedObject.bodyChunks[0].vel : Vector2.zero;
         }
 
         private float GetTotalRopeLength()
@@ -369,7 +430,7 @@ namespace tinker.Silk
         {
             if (attachedBridge != null)
             {
-                if (attachedBridge.room != player.room) { Release(); return; }
+                if (attachedBridge.room != player.room || !attachedBridge.IsActive) { Release(); return; }
                 pos = terrainStuckPos = attachedBridge.GetPointOnSegment(attachedBridgeSeg, attachedBridgeT);
                 if (pullingObject) attachedBridge.ApplyForceAt(pos, (baseChunk.pos - pos).normalized * 5f, 32f);
             }

@@ -1,5 +1,5 @@
 using RWCustom;
-using System.Collections.Concurrent;
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using tinker;
@@ -9,8 +9,10 @@ namespace Tinker.PlayerGraphics_Hooks
 {
     public static class PlayerGraphicsHooks
     {
-        internal static ConcurrentDictionary<Player, AntennaSystem> activeSystems = new();
-        internal static readonly ConditionalWeakTable<PlayerGraphics, TailModule> tailData = new();
+        internal static ConditionalWeakTable<PlayerGraphics, AntennaSystem> activeSystems = new();
+        private static readonly List<WeakReference<PlayerGraphics>> trackedGraphics = new();
+        internal static ConditionalWeakTable<PlayerGraphics, TailModule> tailData = new();
+        internal static ConditionalWeakTable<PlayerGraphics, SpiderArmsModule> armData = new();
 
         private static bool hooksRegistered;
 
@@ -18,7 +20,6 @@ namespace Tinker.PlayerGraphics_Hooks
         {
             if (hooksRegistered) return;
 
-            On.Player.Update += Player_Update;
             On.PlayerGraphics.Update += PlayerGraphics_Update;
             On.PlayerGraphics.Reset += PlayerGraphics_Reset;
             On.PlayerGraphics.InitiateSprites += PlayerGraphics_InitiateSprites;
@@ -33,7 +34,7 @@ namespace Tinker.PlayerGraphics_Hooks
             orig(self);
 
             if (self.owner is Player player &&
-                activeSystems.TryGetValue(player, out var system))
+                activeSystems.TryGetValue(self, out var system))
             {
                 system.Reset();
             }
@@ -45,25 +46,9 @@ namespace Tinker.PlayerGraphics_Hooks
 
             if (self.owner is Player player)
             {
-                if (activeSystems.TryGetValue(player, out var system))
+                if (activeSystems.TryGetValue(self, out var system))
                     system.Update();
 
-                if (tailData.TryGetValue(self, out var tail))
-                    tail.Update();
-            }
-        }
-
-        private static void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
-        {
-            orig(self, eu);
-
-            bool shouldHave = ShouldHaveAntenna(self);
-            bool has = activeSystems.ContainsKey(self);
-
-            if (!shouldHave && has)
-            {
-                if (activeSystems.TryRemove(self, out var system))
-                    system.RemoveSprites();
             }
         }
 
@@ -82,15 +67,22 @@ namespace Tinker.PlayerGraphics_Hooks
             {
                 tail = new TailModule(self);
                 tailData.Add(self, tail);
+                trackedGraphics.RemoveAll(reference => !reference.TryGetTarget(out _));
+                trackedGraphics.Add(new WeakReference<PlayerGraphics>(self));
             }
             tail.InitiateSprites(sLeaser, rCam);
 
+            if (!armData.TryGetValue(self, out var arms))
+            {
+                arms = new SpiderArmsModule(self, player);
+                armData.Add(self, arms);
+            }
+            arms.InitiateSprites(sLeaser, rCam);
+
             if (ShouldHaveAntenna(player))
             {
-                if (!activeSystems.ContainsKey(player))
-                    activeSystems[player] = new AntennaSystem(self, player);
-
-                activeSystems[player].InitiateSprites(sLeaser, rCam);
+                var system = activeSystems.GetValue(self, graphics => new AntennaSystem(graphics, player));
+                system.InitiateSprites(sLeaser, rCam);
             }
         }
 
@@ -104,12 +96,16 @@ namespace Tinker.PlayerGraphics_Hooks
         {
             orig(self, sLeaser, rCam, timeStacker, camPos);
 
-            if (self.owner is not Player player) return;
+            if (self.owner is not Player player || sLeaser.deleteMeNextFrame ||
+                player.slatedForDeletetion || player.room != rCam.room) return;
 
             if (tailData.TryGetValue(self, out var tail))
                 tail.DrawSprites(sLeaser, rCam, timeStacker, camPos);
 
-            if (activeSystems.TryGetValue(player, out var system))
+            if (armData.TryGetValue(self, out var arms))
+                arms.DrawSprites(sLeaser, rCam, timeStacker, camPos);
+
+            if (activeSystems.TryGetValue(self, out var system))
                 system.DrawSprites(sLeaser, rCam, timeStacker, camPos);
         }
 
@@ -125,8 +121,11 @@ namespace Tinker.PlayerGraphics_Hooks
             if (tailData.TryGetValue(self, out var tail))
                 tail.AddToContainer(sLeaser, rCam, container);
 
+            if (armData.TryGetValue(self, out var arms))
+                arms.AddToContainer(sLeaser, rCam, container);
+
             if (self.owner is Player player &&
-                activeSystems.TryGetValue(player, out var system))
+                activeSystems.TryGetValue(self, out var system))
             {
                 system.AddToContainer(sLeaser, rCam, container);
             }
@@ -137,18 +136,23 @@ namespace Tinker.PlayerGraphics_Hooks
             return player != null &&
                    player.slugcatStats?.name.ToString() == Plugin.SlugName.ToString() &&
                    player.room != null &&
-                   player.graphicsModule != null &&
-                   player.bodyMode != Player.BodyModeIndex.ClimbIntoShortCut;
+                   player.graphicsModule != null;
         }
 
         public static void Cleanup()
         {
-            foreach (var kv in activeSystems)
-                kv.Value.RemoveSprites();
+            foreach (var reference in trackedGraphics)
+            {
+                if (!reference.TryGetTarget(out var graphics)) continue;
+                if (activeSystems.TryGetValue(graphics, out var antenna)) antenna.RemoveSprites();
+                if (tailData.TryGetValue(graphics, out var tail)) tail.Cleanup();
+                if (armData.TryGetValue(graphics, out var arms)) arms.Cleanup();
+            }
+            trackedGraphics.Clear();
+            activeSystems = new();
+            tailData = new();
+            armData = new();
 
-            activeSystems.Clear();
-
-            On.Player.Update -= Player_Update;
             On.PlayerGraphics.Update -= PlayerGraphics_Update;
             On.PlayerGraphics.Reset -= PlayerGraphics_Reset;
             On.PlayerGraphics.InitiateSprites -= PlayerGraphics_InitiateSprites;

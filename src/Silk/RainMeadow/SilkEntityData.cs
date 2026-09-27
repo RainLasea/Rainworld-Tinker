@@ -1,3 +1,4 @@
+#if RAINMEADOW
 using RainMeadow;
 using UnityEngine;
 
@@ -99,3 +100,4 @@ namespace tinker.Silk.RainMeadow
             => new TinkerSilkEntityDataState(this);
     }
 }
+#endif

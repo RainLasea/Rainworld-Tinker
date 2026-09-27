@@ -1,5 +1,6 @@
-﻿using RWCustom;
+using RWCustom;
 using System.Collections.Generic;
+using Tinker.PlayerGraphics_Hooks;
 using UnityEngine;
 
 namespace tinker.Silk
@@ -14,7 +15,7 @@ namespace tinker.Silk
         private FSprite pullIndicator;
         public bool IsSpritesInitiated => spritesInitiated;
         private bool spritesInitiated;
-        private RoomCamera currentCamera;
+        private readonly LeaserSprites leasedSprites = new();
 
         private SilkMode lastDrawnMode;
         private bool wasPulling;
@@ -22,7 +23,7 @@ namespace tinker.Silk
         private float currentTension;
         private float displayedTension;
 
-        private const int MAX_ROPE_RENDER_SEGMENTS = 50;
+        private const int MAX_ROPE_RENDER_SEGMENTS = 120;
         private Vector2[] fadingPositions;
         private Vector2[] fadingLastPositions;
         private float segmentLength;
@@ -55,8 +56,7 @@ namespace tinker.Silk
 
         public void InitiateSprites(RoomCamera.SpriteLeaser sLeaser, RoomCamera rCam)
         {
-            if (spritesInitiated) return;
-            currentCamera = rCam;
+            RemoveSprites();
 
             lineMesh = TriangleMesh.MakeLongMesh(MAX_ROPE_RENDER_SEGMENTS, false, true);
             lineMesh.shader = rCam.game.rainWorld.Shaders["Basic"];
@@ -70,13 +70,14 @@ namespace tinker.Silk
             pullIndicator.shader = rCam.game.rainWorld.Shaders["FlatLight"];
             pullIndicator.alpha = 0f;
 
-            AddToContainer(rCam.ReturnFContainer("Midground"));
+            leasedSprites.Add(sLeaser, lineMesh, tensionIndicator, pullIndicator);
+            AddToContainer(sLeaser, rCam.ReturnFContainer("Midground"));
             spritesInitiated = true;
         }
 
-        public void AddToContainer(FContainer newContainer)
+        public void AddToContainer(RoomCamera.SpriteLeaser leaser, FContainer newContainer)
         {
-            if (newContainer == null) return;
+            if (newContainer == null || !leasedSprites.TryGet(leaser, out _)) return;
 
             if (lineMesh != null)
             {
@@ -118,10 +119,25 @@ namespace tinker.Silk
                 wasSuperJumping = false;
             }
 
-            if (!fadingActive && lastDrawnMode != SilkMode.Retracted && silk.mode == SilkMode.Retracted)
+            if (silk.mode == SilkMode.Retracted && silk.instantDisappear)
             {
-                bool isBridging = silk.Attached && silk.attachedBridge != null;
-                if (!isBridging && lastRenderedPathCache != null && lastRenderedPathCache.Count >= 2)
+                // Every camera observes this flag; do not consume it on the first
+                // draw or another camera can recreate the transferred strand.
+                fadingActive = false;
+                fadeAlpha = 0f;
+                fadingPositions = fadingLastPositions = null;
+                lastRenderedPathCache = null;
+                shootAnimFrames = 0;
+                wasSuperJumping = isSuperJumpFade = false;
+                currentTension = displayedTension = 0f;
+                wasPulling = false;
+                lastDrawnMode = silk.mode;
+                HideAllSprites();
+                return true;
+            }
+            else if (!fadingActive && lastDrawnMode != SilkMode.Retracted && silk.mode == SilkMode.Retracted)
+            {
+                if (lastRenderedPathCache != null && lastRenderedPathCache.Count >= 2)
                 {
                     StartFadeFromPath(lastRenderedPathCache);
                 }
@@ -138,9 +154,9 @@ namespace tinker.Silk
 
             if (ropeShouldBeVisible && !fadingActive)
             {
-                var path = silk.GetRopePath();
+                var path = silk.GetRopePath(timeStacker);
                 UpdateUmbilicalStyleMesh(path, timeStacker, camPos);
-                CacheCurrentRenderPath();
+                CacheCurrentRenderPath(path);
             }
             else if (fadingActive)
             {
@@ -211,7 +227,7 @@ namespace tinker.Silk
 
         private void StartFadeFromPath(List<Vector2> path)
         {
-            int count = MAX_ROPE_RENDER_SEGMENTS;
+            const int count = 50;
             fadingPositions = new Vector2[count];
             fadingLastPositions = new Vector2[count];
             isSuperJumpFade = wasSuperJumping;
@@ -297,9 +313,8 @@ namespace tinker.Silk
             if (fadeAlpha <= 0) fadingActive = false;
         }
 
-        private void CacheCurrentRenderPath()
+        private void CacheCurrentRenderPath(List<Vector2> path)
         {
-            var path = silk.GetRopePath();
             if (path != null && path.Count >= 2) lastRenderedPathCache = new List<Vector2>(path);
         }
 
@@ -355,9 +370,7 @@ namespace tinker.Silk
 
         public void RemoveSprites()
         {
-            if (!spritesInitiated) return;
-            FNode[] sprites = { lineMesh, tensionIndicator, pullIndicator };
-            foreach (var sprite in sprites) if (sprite != null) sprite.RemoveFromContainer();
+            leasedSprites.Cleanup();
             spritesInitiated = false;
         }
 

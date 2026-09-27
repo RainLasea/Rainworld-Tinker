@@ -1,7 +1,9 @@
-using RainMeadow;
 using System;
 using System.Linq;
 using UnityEngine;
+#if RAINMEADOW
+using RainMeadow;
+#endif
 
 namespace tinker.Silk.RainMeadow
 {
@@ -46,7 +48,7 @@ namespace tinker.Silk.RainMeadow
         public static void AttachSilkData(Player player)
         {
             if (!IsRainMeadowLoaded) return;
-
+#if RAINMEADOW
             var opo = GetOnlinePhysicalObject(player);
             if (opo == null) return;
 
@@ -54,6 +56,7 @@ namespace tinker.Silk.RainMeadow
 
             var data = new TinkerSilkEntityData();
             opo.AddData(data);
+#endif
         }
 
         /// <summary>
@@ -62,7 +65,7 @@ namespace tinker.Silk.RainMeadow
         public static void PushSilkState(Player player, SilkPhysics silk)
         {
             if (!IsRainMeadowLoaded) return;
-
+#if RAINMEADOW
             var opo = GetOnlinePhysicalObject(player);
             if (opo == null) return;
 
@@ -81,6 +84,7 @@ namespace tinker.Silk.RainMeadow
             data.RopeLength = silk.idealRopeLength;
             data.PullingObject = silk.pullingObject;
             data.SuperJumpTimer = silk.superJumpTimer;
+#endif
         }
 
         /// <summary>
@@ -89,7 +93,7 @@ namespace tinker.Silk.RainMeadow
         public static bool PullSilkState(Player player, SilkPhysics silk)
         {
             if (!IsRainMeadowLoaded) return false;
-
+#if RAINMEADOW
             var opo = GetOnlinePhysicalObject(player);
             if (opo == null) return false;
 
@@ -104,28 +108,41 @@ namespace tinker.Silk.RainMeadow
             silk.pullingObject = data.PullingObject;
             silk.superJumpTimer = data.SuperJumpTimer;
             return true;
+#else
+            return false;
+#endif
         }
 
         public static bool HasSilkData(Player player)
         {
             if (!IsRainMeadowLoaded) return false;
+#if RAINMEADOW
             var opo = GetOnlinePhysicalObject(player);
             if (opo == null) return false;
             return opo.TryGetData<TinkerSilkEntityData>(out _);
+#else
+            return false;
+#endif
         }
 
+#if RAINMEADOW
         private static OnlinePhysicalObject GetOnlinePhysicalObject(Player player)
         {
             if (player?.abstractPhysicalObject == null) return null;
             OnlinePhysicalObject.map.TryGetValue(player.abstractPhysicalObject, out var opo);
             return opo;
         }
+#endif
 
         public static bool IsOnlineAndRemote(Player player)
         {
             if (!IsRainMeadowLoaded) return false;
+#if RAINMEADOW
             var opo = GetOnlinePhysicalObject(player);
             return opo != null && !opo.isMine;
+#else
+            return false;
+#endif
         }
     }
 }

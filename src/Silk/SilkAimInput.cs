@@ -261,15 +261,12 @@ namespace tinker.Silk
             // Swing force — based on last frame's input (processed by orig())
             if (self.input[1].x != 0)
             {
-                Vector2 toAnchor = (silk.pos - self.bodyChunks[0].pos).normalized;
-                Vector2 perpendicular = PerpendicularVector(toAnchor);
-                float swingForce = self.input[1].x * 0.5f;
+                Vector2 swingForce = SilkDynamics.SwingAcceleration(
+                    silk.PullPoint - self.bodyChunks[0].pos, self.input[1].x);
 
                 for (int i = 0; i < self.bodyChunks.Length; i++)
                 {
-                    self.bodyChunks[i].vel += perpendicular * swingForce;
-                    if (Mathf.Abs(toAnchor.x) > 0.3f)
-                        self.bodyChunks[i].vel.y -= 0.3f;
+                    self.bodyChunks[i].vel += swingForce;
                 }
             }
 

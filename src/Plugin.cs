@@ -1,4 +1,4 @@
-﻿using BepInEx;
+using BepInEx;
 using HarmonyLib;
 using SlugBase.DataTypes;
 using SlugBase.Features;
@@ -25,9 +25,12 @@ namespace tinker
 
         private Harmony _harmony;
         private bool _isInit = false;
+        private bool _hooksRegistered;
 
         public void OnEnable()
         {
+            if (_hooksRegistered) return;
+            _hooksRegistered = true;
             Instance = this;
             _harmony = new Harmony("abysslasea.tinker");
             _harmony.PatchAll();
@@ -50,9 +53,19 @@ namespace tinker
 
         public void OnDisable()
         {
+            if (!_hooksRegistered) return;
+            _hooksRegistered = false;
             _harmony?.UnpatchAll("abysslasea.tinker");
             On.RainWorld.OnModsInit -= RainWorld_OnModsInit_LoadResources;
-            On.Menu.FastTravelScreen.SpawnSlugcatButtons += FastTravelScreen_SpawnSlugcatButtons;
+            On.HUD.HUD.InitSinglePlayerHud -= HUD_InitSinglePlayerHud;
+            On.Menu.FastTravelScreen.SpawnSlugcatButtons -= FastTravelScreen_SpawnSlugcatButtons;
+            On.Player.Update -= Player_Update;
+            NightVisionHooks.Cleanup();
+            SilkAimInput.Cleanup();
+            SilkClimb.Cleanup();
+            SilkBridgeGraphics.Cleanup();
+            SilkBridgeManager.Cleanup();
+            TinkerLanguageHint.Cleanup();
             tinkerSilkData.Cleanup();
             MouseAimSystem.Cleanup();
             MouseRender.Cleanup();
@@ -65,8 +78,8 @@ namespace tinker
         {
             orig(self);
             if (_isInit) return;
-            _isInit = true;
 
+#if RAINMEADOW
             if (tinker.Silk.RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
             {
                 try
@@ -77,57 +90,54 @@ namespace tinker
                 {
                 }
             }
+#endif
 
             OptionalImprovedInput.Initialize();
 
             //Tinker.AncientBot.GenerateKeyDrone.RegisterValues();
             //Tinker.AncientBot.GenerateKeyDrone.ApplyHooks();
 
-            try
-            {
-                string path = AssetManager.ResolveFilePath("shaders/nvshader/nvshader");
-                AssetBundle ab = AssetBundle.LoadFromFile(path);
-                if (ab != null)
-                {
-                    Shader shaderSource = ab.LoadAsset<Shader>("Assets/Shaders/NightVision.shader");
-                    if (!self.Shaders.ContainsKey("TinkerNightVision"))
-                    {
-                        self.Shaders.Add("TinkerNightVision", FShader.CreateShader("TinkerNightVision", shaderSource));
-                    }
-                }
-            }
-            catch (System.Exception) { }
-
-            try
-            {
-                string hudPath = AssetManager.ResolveFilePath("shaders/hudshader");
-                AssetBundle hudAb = AssetBundle.LoadFromFile(hudPath);
-                if (hudAb != null)
-                {
-                    Shader silkShaderSource = hudAb.LoadAsset<Shader>("Assets/Shaders/SilkJarWave.shader");
-                    if (!self.Shaders.ContainsKey("SilkJarWave"))
-                    {
-                        self.Shaders.Add("SilkJarWave", FShader.CreateShader("SilkJarWave", silkShaderSource));
-                    }
-                }
-            }
-            catch (System.Exception)
-            {
-            }
+            LoadShader(self, "shaders/nvshader/nvshader", "Assets/Shaders/NightVision.shader", "TinkerNightVision");
+            LoadShader(self, "shaders/hudshader", "Assets/Shaders/SilkJarWave.shader", "SilkJarWave");
 
             Futile.atlasManager.LoadAtlas("atlases/tinker_face");
             Futile.atlasManager.LoadAtlas("atlases/silkhud");
             Futile.atlasManager.LoadAtlas("atlases/Mouse");
             Futile.atlasManager.LoadAtlas("atlases/Small_Tinker");
             MachineConnector.SetRegisteredOI(MOD_ID, new Options_Hook());
+            _isInit = true;
+        }
+
+        private void LoadShader(RainWorld rainWorld, string path, string assetName, string shaderName)
+        {
+            if (rainWorld.Shaders.ContainsKey(shaderName)) return;
+            AssetBundle bundle = null;
+            try
+            {
+                bundle = AssetBundle.LoadFromFile(AssetManager.ResolveFilePath(path));
+                Shader shader = bundle?.LoadAsset<Shader>(assetName);
+                if (shader == null)
+                {
+                    Logger.LogWarning($"Unable to load {shaderName} from {path}");
+                    return;
+                }
+                rainWorld.Shaders.Add(shaderName, FShader.CreateShader(shaderName, shader));
+            }
+            catch (System.Exception error)
+            {
+                Logger.LogError($"Unable to load {shaderName}: {error}");
+            }
+            finally
+            {
+                // Keep the shader alive while releasing the bundle file and metadata.
+                bundle?.Unload(false);
+            }
         }
 
         private void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
         {
             orig(self, eu);
 
-            if (self.graphicsModule == null)
-                self.InitiateGraphicsModule();
             bool isTinker = self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
 
             if (isTinker)

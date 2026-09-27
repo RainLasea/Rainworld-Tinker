@@ -1,4 +1,6 @@
-﻿using RWCustom;
+using RWCustom;
+using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -8,15 +10,32 @@ namespace Tinker.Silk.Bridge
 {
     public static class SilkBridgeGraphics
     {
-        private static readonly Dictionary<Room, List<BridgeRenderer>> roomRenderers = new Dictionary<Room, List<BridgeRenderer>>();
-        private static readonly Dictionary<Player, AnimatedSilkRenderer> animatedSilkRenderers = new Dictionary<Player, AnimatedSilkRenderer>();
-        private static bool initialized = false;
+        private sealed class CameraRenderers
+        {
+            public Room room;
+            public readonly List<BridgeRenderer> bridges = new();
+            public readonly Dictionary<Player, AnimatedSilkRenderer> animated = new();
+
+            public void Clear()
+            {
+                foreach (var renderer in bridges) renderer.Destroy();
+                foreach (var renderer in animated.Values) renderer.Destroy();
+                bridges.Clear();
+                animated.Clear();
+                room = null;
+            }
+        }
+
+        private static ConditionalWeakTable<RoomCamera, CameraRenderers> cameraRenderers = new();
+        private static readonly List<WeakReference<CameraRenderers>> trackedRenderers = new();
+        private static bool initialized;
 
         public static void Initialize()
         {
             if (initialized) return;
             On.RoomCamera.DrawUpdate += RoomCamera_DrawUpdate;
-            On.Room.Loaded += Room_Loaded;
+            On.Room.Unloaded += Room_Unloaded;
+            On.RainWorldGame.ShutDownProcess += Game_ShutDownProcess;
             initialized = true;
         }
 
@@ -24,49 +43,52 @@ namespace Tinker.Silk.Bridge
         {
             if (!initialized) return;
             On.RoomCamera.DrawUpdate -= RoomCamera_DrawUpdate;
-            On.Room.Loaded -= Room_Loaded;
-
-            foreach (var pair in roomRenderers)
-                foreach (var renderer in pair.Value)
-                    renderer.Destroy();
-            roomRenderers.Clear();
-
-            foreach (var renderer in animatedSilkRenderers.Values)
-                renderer.Destroy();
-            animatedSilkRenderers.Clear();
-
+            On.Room.Unloaded -= Room_Unloaded;
+            On.RainWorldGame.ShutDownProcess -= Game_ShutDownProcess;
+            ClearRenderers();
             initialized = false;
         }
 
-        private static void Room_Loaded(On.Room.orig_Loaded orig, Room self)
+        private static void ClearRenderers()
         {
+            foreach (var reference in trackedRenderers)
+                if (reference.TryGetTarget(out var state)) state.Clear();
+            trackedRenderers.Clear();
+            cameraRenderers = new();
+        }
+
+        private static void Game_ShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame self)
+        {
+            ClearRenderers();
             orig(self);
-            if (roomRenderers.ContainsKey(self))
-            {
-                foreach (var renderer in roomRenderers[self])
-                    renderer.Destroy();
-                roomRenderers[self].Clear();
-            }
-            else
-                roomRenderers[self] = new List<BridgeRenderer>();
+        }
+
+        private static void Room_Unloaded(On.Room.orig_Unloaded orig, Room self)
+        {
+            foreach (var reference in trackedRenderers)
+                if (reference.TryGetTarget(out var state) && state.room == self) state.Clear();
+            orig(self);
         }
 
         private static void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed)
         {
             orig(self, timeStacker, timeSpeed);
+            var state = cameraRenderers.GetValue(self, camera =>
+            {
+                var value = new CameraRenderers();
+                trackedRenderers.RemoveAll(reference => !reference.TryGetTarget(out _));
+                trackedRenderers.Add(new WeakReference<CameraRenderers>(value));
+                return value;
+            });
+            if (state.room != self.room)
+            {
+                state.Clear();
+                state.room = self.room;
+            }
             if (self.room == null) return;
 
-            foreach (var pair in roomRenderers.Where(pair => pair.Key != self.room))
-            {
-                foreach (var renderer in pair.Value)
-                    renderer.SetVisible(false);
-            }
-
             List<SilkBridge> bridges = SilkBridgeManager.GetBridgesInRoom(self.room);
-            if (!roomRenderers.ContainsKey(self.room))
-                roomRenderers[self.room] = new List<BridgeRenderer>();
-            List<BridgeRenderer> renderers = roomRenderers[self.room];
-
+            var renderers = state.bridges;
             while (renderers.Count > bridges.Count)
             {
                 int lastIndex = renderers.Count - 1;
@@ -75,26 +97,28 @@ namespace Tinker.Silk.Bridge
             }
             while (renderers.Count < bridges.Count)
                 renderers.Add(new BridgeRenderer(self));
-
             for (int i = 0; i < bridges.Count; i++)
                 renderers[i].Draw(bridges[i], self, timeStacker);
 
-            foreach (var player in self.room.game.Players)
+            foreach (var player in state.animated.Keys.Where(player => player.slatedForDeletetion || player.room != self.room).ToArray())
             {
-                if (player?.realizedCreature is Player p)
+                state.animated[player].Destroy();
+                state.animated.Remove(player);
+            }
+            foreach (var creature in self.room.game.Players)
+            {
+                if (creature?.realizedCreature is not Player player || player.room != self.room) continue;
+                var bridgeState = SilkBridgeManager.GetBridgeModeState(player);
+                if (bridgeState != null && (bridgeState.animating || bridgeState.virtualSilkActive))
                 {
-                    var bridgeState = SilkBridgeManager.GetBridgeModeState(p);
-                    if (bridgeState != null && (bridgeState.animating || bridgeState.virtualSilkActive))
-                    {
-                        if (!animatedSilkRenderers.ContainsKey(p))
-                            animatedSilkRenderers[p] = new AnimatedSilkRenderer(self);
-                        animatedSilkRenderers[p].Draw(bridgeState, p, self, timeStacker);
-                    }
-                    else if (animatedSilkRenderers.ContainsKey(p))
-                    {
-                        animatedSilkRenderers[p].Destroy();
-                        animatedSilkRenderers.Remove(p);
-                    }
+                    if (!state.animated.TryGetValue(player, out var renderer))
+                        state.animated[player] = renderer = new AnimatedSilkRenderer(self);
+                    renderer.Draw(bridgeState, player, self, timeStacker);
+                }
+                else if (state.animated.TryGetValue(player, out var renderer))
+                {
+                    renderer.Destroy();
+                    state.animated.Remove(player);
                 }
             }
         }
@@ -102,7 +126,7 @@ namespace Tinker.Silk.Bridge
         private class BridgeRenderer
         {
             private TriangleMesh mesh;
-            private const int MAX_SEGMENTS = 60;
+            private const int MAX_SEGMENTS = 161;
 
             public BridgeRenderer(RoomCamera cam)
             {
@@ -129,17 +153,17 @@ namespace Tinker.Silk.Bridge
                 Vector2 camPos = cam.pos;
                 mesh.isVisible = true;
 
-                List<Vector2> renderPath = bridge.GetRenderPath();
-                int segmentCount = Mathf.Min(renderPath.Count - 1, MAX_SEGMENTS - 1);
-
                 float currentDist = Vector2.Distance(bridge.startPoint, bridge.endPoint);
+                int edges = bridge.VisualEdgeCount;
+                int subdivisions = Mathf.Clamp(Mathf.CeilToInt(currentDist / (6f * edges)), 1, Mathf.Max(1, (MAX_SEGMENTS - 1) / edges));
+                int segmentCount = Mathf.Min(edges * subdivisions, MAX_SEGMENTS - 1);
                 float stretchFactor = Mathf.Clamp01(currentDist / 600f);
-                float baseWidth = Mathf.Lerp(2.5f, 1.7f, stretchFactor);
+                float baseWidth = Mathf.Lerp(2f, 1.3f, stretchFactor);
 
                 for (int i = 0; i < segmentCount; i++)
                 {
-                    Vector2 segStart = renderPath[i];
-                    Vector2 segEnd = renderPath[i + 1];
+                    Vector2 segStart = bridge.GetVisualPoint(bridge.GetVisualParameter((float)i / segmentCount), timeStacker);
+                    Vector2 segEnd = bridge.GetVisualPoint(bridge.GetVisualParameter((float)(i + 1) / segmentCount), timeStacker);
                     Vector2 segDir = (segEnd - segStart).normalized;
                     Vector2 perpendicular = Custom.PerpendicularVector(segDir);
 
@@ -168,7 +192,7 @@ namespace Tinker.Silk.Bridge
         private class AnimatedSilkRenderer
         {
             private TriangleMesh lineMesh;
-            private const int MAX_SEGMENTS = 60;
+            private const int MAX_SEGMENTS = 121;
 
             public AnimatedSilkRenderer(RoomCamera cam)
             {
@@ -186,40 +210,28 @@ namespace Tinker.Silk.Bridge
 
             public void Draw(BridgeModeState bridgeState, Player p, RoomCamera cam, float timeStacker)
             {
-                Vector2 startPos = bridgeState.GetRenderD1Position();
+                Vector2 startPos = bridgeState.GetRenderD1Position(timeStacker);
                 Vector2 endPos = bridgeState.point2;
                 float distance = Vector2.Distance(startPos, endPos);
 
                 if (distance < 1f) { lineMesh.isVisible = false; return; }
                 lineMesh.isVisible = true;
 
-                int segmentCount = Mathf.Min(Mathf.CeilToInt(distance / 8f), MAX_SEGMENTS - 1);
+                int segmentCount = Mathf.Min(Mathf.CeilToInt(distance / 6f), MAX_SEGMENTS - 1);
                 segmentCount = Mathf.Max(segmentCount, 2);
 
                 Vector2 camPos = cam.pos;
-                float playerVelMod = p.mainBodyChunk.vel.magnitude;
-                float shakeIntensity = Mathf.Min(playerVelMod * 1.5f, 15f);
-
-                float baseWidth = Mathf.Lerp(2.6f, 1.8f, Mathf.Clamp01(distance / 500f)); // 增加1f宽度
+                float baseWidth = Mathf.Lerp(2f, 1.3f, Mathf.Clamp01(distance / 600f));
 
                 for (int i = 0; i < segmentCount; i++)
                 {
                     float t = (float)i / segmentCount;
                     float nextT = (float)(i + 1) / segmentCount;
 
-                    Vector2 p1 = Vector2.Lerp(startPos, endPos, t);
-                    Vector2 p2 = Vector2.Lerp(startPos, endPos, nextT);
-                    Vector2 dir = (p2 - p1).normalized;
-                    Vector2 perp = Custom.PerpendicularVector(dir);
-
-                    float sinBase = Mathf.Sin(t * Mathf.PI * 8f + Time.time * 65f);
-                    float offsetForce = sinBase * shakeIntensity * Mathf.Sin(t * Mathf.PI);
-
-                    p1 += perp * offsetForce;
-                    p2 += perp * (Mathf.Sin(nextT * Mathf.PI * 8f + Time.time * 65f) * shakeIntensity * Mathf.Sin(nextT * Mathf.PI));
-
-                    float widthWave = sinBase * 0.6f * (shakeIntensity / 5f);
-                    float width = (baseWidth + widthWave) * (1f - Mathf.Abs(t * 2f - 1f) * 0.15f);
+                    Vector2 p1 = bridgeState.GetLaunchVisualPoint(t, timeStacker);
+                    Vector2 p2 = bridgeState.GetLaunchVisualPoint(nextT, timeStacker);
+                    Vector2 perp = Custom.PerpendicularVector((p2 - p1).normalized);
+                    float width = baseWidth * (1f - Mathf.Abs(t * 2f - 1f) * 0.15f);
 
                     int v = i * 4;
                     lineMesh.MoveVertice(v, p1 - perp * width * 0.5f - camPos);
