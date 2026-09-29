@@ -47,7 +47,9 @@ namespace Tinker.Player_GrabUpdate
 
         public static bool CanEatWhileMoving(Vector2 position, Vector2 lastPosition, float distance, Player player)
         {
-            if (tinkerSilkData.IsTinkerPlayer(player) && tinkerSilkData.Get(player).Attached)
+            if (!tinker.Silk.RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player) &&
+                tinkerSilkData.IsTinkerPlayer(player) &&
+                (tinkerSilkData.Get(player).Attached || SilkClimb.IsClimbing(player)))
                 return player.input[0].pckp;
             return RWCustom.Custom.DistLess(position, lastPosition, distance);
         }

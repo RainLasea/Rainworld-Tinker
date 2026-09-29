@@ -53,6 +53,12 @@ namespace tinker.Silk
 
         public static void AddEnergy(Player player, float amount, bool isEating = false) => SetEnergy(player, GetEnergy(player) + amount, isEating);
 
+        internal static void ApplyNetworkEnergy(Player player, float energy, bool exhausted)
+        {
+            energyTable.GetValue(player, p => new StrongBox<float>()).Value = Mathf.Clamp(energy, 0f, 140f);
+            exhaustedTable.GetValue(player, p => new StrongBox<bool>()).Value = exhausted;
+        }
+
         public static SilkPhysics Get(Player player)
         {
             return physicsTable.GetValue(player, p => new SilkPhysics(p));
@@ -109,10 +115,8 @@ namespace tinker.Silk
             {
                 Get(self);
 
-                // CRITICAL: Attach EntityData for Rain Meadow sync immediately at ctor time.
-                // On the host, the OnlinePhysicalObject map entry is set up by RM before Player.ctor runs.
-                // If we delay AttachSilkData to PlayerUpdate, the first RM EntityState snapshot
-                // might be sent without our EntityData, and the remote client never receives it.
+                // Attach early when the online entity already exists. PlayerUpdate
+                // retries if Meadow registers it after this constructor returns.
                 if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
                 {
                     RainMeadow.RainMeadowBridge.AttachSilkData(self);
@@ -122,6 +126,20 @@ namespace tinker.Silk
 
         private static void PlayerUpdate(On.Player.orig_Update orig, Player self, bool eu)
         {
+            // Ownership and received attachment state must be ready before GrabUpdate,
+            // animation and input hooks consult silk during the original player update.
+            if (IsTinkerPlayer(self))
+            {
+                var before = Get(self);
+                bool remote = CheckIsRemotePlayer(self);
+                if (before.isRemote && !remote) before.ResetNetworkSilk();
+                before.isRemote = remote;
+                if (remote)
+                {
+                    before.lastPos = before.pos;
+                    RainMeadow.RainMeadowBridge.PullSilkState(self, before);
+                }
+            }
             orig(self, eu);
 
             if (!IsTinkerPlayer(self)) return;
@@ -139,11 +157,7 @@ namespace tinker.Silk
             // Sync silk state with Rain Meadow every frame
             if (RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
             {
-                if (isRemote)
-                {
-                    RainMeadow.RainMeadowBridge.PullSilkState(self, silk);
-                }
-                else
+                if (!isRemote)
                 {
                     // Safety: ensure EntityData is attached (may have been missed in PlayerCtor)
                     if (!RainMeadow.RainMeadowBridge.HasSilkData(self))
@@ -179,7 +193,7 @@ namespace tinker.Silk
             orig(self, add);
 
             // Only track food energy for Tinker players
-            if (!IsTinkerPlayer(self)) return;
+            if (!IsTinkerPlayer(self) || RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self)) return;
 
             float energyToAdd = 0f;
             for (int i = 0; i < add; i++)
@@ -201,6 +215,7 @@ namespace tinker.Silk
         {
             if (player == null || float.IsNaN(demand) || float.IsInfinity(demand) || demand < 0f)
                 return false;
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player)) return false;
             float currentEnergy = GetEnergy(player);
 
             if (currentEnergy >= demand)

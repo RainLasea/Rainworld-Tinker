@@ -1,7 +1,7 @@
-﻿using System.Collections.Generic;
-using System.Runtime.CompilerServices;
+using System.Collections.Generic;
 using Tinker.Silk.Bridge;
 using UnityEngine;
+using tinker.Mouse;
 using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Silk
@@ -10,20 +10,11 @@ namespace tinker.Silk
     {
         private const float MIN_ROPE_VISIBLE = 0.1f;
 
-        private static readonly HashSet<int> silkRequestPlayers = new();
         private static readonly Dictionary<int, bool> verticalInputLastFrame = new();
         private static readonly Dictionary<int, bool> rightMouseDownLastFrame = new();
         private static readonly Dictionary<int, bool> leftMouseDownLastFrame = new();
         private static readonly Dictionary<int, Room> lastPlayerRoom = new();
         private static readonly Dictionary<int, bool> jumpLastFrame = new();
-
-        public static bool IsShooting(Player player)
-        {
-            int playerNum = player.playerState?.playerNumber ?? -1;
-            return playerNum >= 0 && silkRequestPlayers.Contains(playerNum);
-        }
-
-        public static bool IsReleasing(Player player) => false;
 
         public static void Initialize()
         {
@@ -35,7 +26,6 @@ namespace tinker.Silk
         {
             On.Player.Update -= Player_Update_Input;
             On.PlayerGraphics.SuckedIntoShortCut -= PlayerGraphics_SuckedIntoShortCut;
-            silkRequestPlayers.Clear();
             verticalInputLastFrame.Clear();
             rightMouseDownLastFrame.Clear();
             leftMouseDownLastFrame.Clear();
@@ -57,63 +47,6 @@ namespace tinker.Silk
             }
         }
 
-        private static Vector2 GetMouseAimDirection(Player player)
-        {
-            var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
-            bool useMouse = cam != null;
-
-            Vector2 aimVector;
-
-            if (useMouse)
-            {
-                Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-                Vector2 headPos = player.bodyChunks[0].pos;
-                aimVector = mouseWorldPos - headPos;
-            }
-            else
-            {
-                if (player.input[0].x != 0 || player.input[0].y != 0)
-                    aimVector = new Vector2(player.input[0].x, player.input[0].y);
-                else if (player.bodyChunks[0].vel.magnitude > 0.5f)
-                    aimVector = player.bodyChunks[0].vel;
-                else
-                    aimVector = Vector2.right * player.flipDirection;
-            }
-
-            if (aimVector.magnitude < 0.1f)
-                aimVector = Vector2.right * player.flipDirection;
-
-            return aimVector.normalized;
-        }
-
-        private static Vector2 GetMouseAimDirectionFromPoint(Vector2 referencePoint, Player player)
-        {
-            var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
-            bool useMouse = cam != null;
-
-            Vector2 aimVector;
-
-            if (useMouse)
-            {
-                Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-                aimVector = mouseWorldPos - referencePoint;
-            }
-            else
-            {
-                if (player.input[0].x != 0 || player.input[0].y != 0)
-                    aimVector = new Vector2(player.input[0].x, player.input[0].y);
-                else
-                    aimVector = Vector2.right * player.flipDirection;
-            }
-
-            if (aimVector.magnitude < 0.1f)
-                aimVector = Vector2.right * player.flipDirection;
-
-            return aimVector.normalized;
-        }
-
-        private static Vector2 PerpendicularVector(Vector2 v) => new Vector2(v.y, -v.x);
-
         private static void MovePlayerVertically(Player player, SilkPhysics silk, float direction)
         {
             Vector2 toAnchor = (silk.pos - player.bodyChunks[0].pos).normalized;
@@ -130,7 +63,7 @@ namespace tinker.Silk
             // Forces applied here WILL be processed by the game's collision/physics
             // ═══════════════════════════════════════════════════
             bool isTinker = IsTinkerPlayer(self);
-            if (isTinker && self.room != null && !self.dead)
+            if (isTinker && !IsRemotePlayer(self) && self.room != null && !self.dead)
             {
                 SilkPhysics silk = tinkerSilkData.Get(self);
                 if (silk.Attached && !(SilkBridgeManager.GetBridgeModeState(self)?.animating == true))
@@ -172,7 +105,7 @@ namespace tinker.Silk
             bool usingGamepad = gamepad.connected || gamepad.ltHeld || gamepad.rtHeld || gamepadState.aiming;
 
             // Read raw mouse/keyboard input for trigger events.
-            ReadMouseInputState(playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown, out bool leftMouseDown);
+            ReadMouseInputState(playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown);
 
             // Track game input state changes
             ReadGameInputState(self, playerNum, out bool wasVerticalInput, out bool currentVerticalInput, out bool wasJumping, out bool isJumping);
@@ -193,7 +126,7 @@ namespace tinker.Silk
             else
             {
                 // Bridge mode: activate/deactivate + shoot virtual silk
-                HandleBridgeMode(self, silk2, bridgeState, rightMouseDown, leftMousePressed, inBridgeMode, animationRunning);
+                HandleBridgeMode(self, silk2, bridgeState, rightMouseDown, leftMousePressed);
             }
 
             // Vertical input released → lock rope length
@@ -202,7 +135,7 @@ namespace tinker.Silk
                 silk2.idealRopeLength = Mathf.Max(silk2.requestedRopeLength, MIN_ROPE_VISIBLE);
             }
 
-            // Super jump trigger detection + burst vel applied next frame
+            // Super jump trigger detection and immediate burst.
             bool jumpTriggered = isJumping && !wasJumping;
             HandleSuperJump(self, silk2, jumpTriggered);
 
@@ -210,7 +143,7 @@ namespace tinker.Silk
             if (!usingGamepad && rightMousePressed && !inBridgeMode && !animationRunning)
             {
                 if (silk2.mode == SilkMode.Retracted)
-                    silk2.Shoot(GetMouseAimDirection(self));
+                    silk2.Shoot(MouseAimSystem.GetAimDirection(self));
                 else if (silk2.Attached)
                     silk2.Release();
             }
@@ -249,11 +182,7 @@ namespace tinker.Silk
             {
                 return RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self);
             }
-            if (self.controller == null) return false;
-            string controllerType = self.controller.GetType().Name;
-            // Standard vanilla controllers: KeyboardController, JoystickController
-            // Rain Meadow remote controller: OnlineController
-            return controllerType != "KeyboardController" && controllerType != "JoystickController";
+            return false;
         }
 
         private static void ApplyContinuousPhysicsForces(Player self, SilkPhysics silk)
@@ -275,18 +204,7 @@ namespace tinker.Silk
             {
                 MovePlayerVertically(self, silk, Mathf.Sign(self.input[1].y));
             }
-
-            // Super jump burst — reserved for future: apply burst from previous frame's trigger
-            if (pendingSuperJumpBurst.TryGetValue(self, out object _))
-            {
-                // Currently the super jump burst is applied immediately in HandleSuperJump (post-orig).
-                // This pre-orig slot is reserved for burst migration when the one-frame lag
-                // from using input[1] is acceptable.
-                pendingSuperJumpBurst.Remove(self);
-            }
         }
-
-        private static readonly ConditionalWeakTable<Player, object> pendingSuperJumpBurst = new ConditionalWeakTable<Player, object>();
 
         private static void TrackRoomChange(Player self, int playerNum, SilkPhysics silk)
         {
@@ -301,10 +219,10 @@ namespace tinker.Silk
             }
         }
 
-        private static void ReadMouseInputState(int playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown, out bool leftMouseDown)
+        private static void ReadMouseInputState(int playerNum, out bool rightMousePressed, out bool leftMousePressed, out bool rightMouseDown)
         {
             rightMouseDown = Input.GetKey(Options_Hook.SilkShootKey);
-            leftMouseDown = Input.GetMouseButton(0);
+            bool leftMouseDown = Input.GetMouseButton(0);
             bool wasRightMouseDown = rightMouseDownLastFrame.GetValueOrDefault(playerNum);
             bool wasLeftMouseDown = leftMouseDownLastFrame.GetValueOrDefault(playerNum);
 
@@ -326,7 +244,7 @@ namespace tinker.Silk
             jumpLastFrame[playerNum] = isJumping;
         }
 
-        private static void HandleBridgeMode(Player self, SilkPhysics silk, BridgeModeState bridgeState, bool rightMouseDown, bool leftMousePressed, bool inBridgeMode, bool animationRunning)
+        private static void HandleBridgeMode(Player self, SilkPhysics silk, BridgeModeState bridgeState, bool rightMouseDown, bool leftMousePressed)
         {
             if (silk.Attached && rightMouseDown && bridgeState != null)
             {
@@ -350,10 +268,10 @@ namespace tinker.Silk
                 if (leftMousePressed && !bridgeState.animating)
                 {
                     Vector2 D2 = bridgeState.point2;
-                    Vector2 shootDir = GetMouseAimDirectionFromPoint(D2, self);
-                    Vector2 mouseWorld = GetMouseWorldPosition();
-                    bridgeState.ShootVirtualSilk(shootDir, D2, self.room, mouseWorld);
-                    silk.Release();
+                    Vector2 shootDir = MouseAimSystem.GetAimDirection(self, D2);
+                    Vector2? target = MouseAimSystem.TryGetMouseWorldPosition(self, out var mouseWorld) ? mouseWorld : null;
+                    bridgeState.ShootVirtualSilk(shootDir, D2, self.room, target, self);
+                    silk.DetachPhysicsOnly();
                 }
             }
             else if (bridgeState?.active == true && !bridgeState.animating)
@@ -408,13 +326,24 @@ namespace tinker.Silk
 
         private static void TryAttachToBridge(Player self, bool inBridgeMode)
         {
-            if (inBridgeMode || SilkClimb.IsClimbing(self) || !self.Consious || self.bodyMode == Player.BodyModeIndex.CorridorClimb)
+            if (inBridgeMode || SilkClimb.IsClimbing(self) || !self.Consious || self.inShortcut ||
+                self.enteringShortCut.HasValue || self.grabbedBy.Count > 0 || SilkClimb.BeamAnimation(self.animation) ||
+                self.bodyMode == Player.BodyModeIndex.CorridorClimb || self.Submersion > 0.9f)
                 return;
 
             if (self.input[0].y > 0)
             {
-                Vector2 checkPos = self.mainBodyChunk.pos + new Vector2(0f, 15f);
-                SilkBridge closestBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, 40f);
+                Vector2 checkPos = self.mainBodyChunk.pos;
+                SilkBridge closestBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, 12f);
+
+                // Like vanilla's previous-to-current tile scan, catch a strand
+                // crossed during a fast fall even when this frame ends below it.
+                if (closestBridge == null && SilkBridgeManager.RayTraceBridgesReturnFirstIntersection(
+                    self.room, self.mainBodyChunk.lastPos, checkPos, out var crossed, out var hit, out _))
+                {
+                    closestBridge = crossed;
+                    checkPos = hit;
+                }
 
                 if (closestBridge != null)
                 {
@@ -423,18 +352,8 @@ namespace tinker.Silk
                     closestBridge.GetClosestPoint(checkPos, out segIndex, out t);
 
                     SilkClimb.AttachPlayerToSilk(self, closestBridge, segIndex, t);
-                    self.Blink(5);
-                    self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 1f, 1f);
                 }
             }
-        }
-
-        private static Vector2 GetMouseWorldPosition()
-        {
-            var cam = tinker.Mouse.MouseAimSystem.GetCurrentCamera();
-            if (cam != null)
-                return new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-            return Vector2.zero;
         }
 
         // ── Gamepad input methods ─────────────────────────────────────
@@ -507,8 +426,8 @@ namespace tinker.Silk
                 {
                     bridgeState.ShootVirtualSilk(
                         (gpState.aimWorldPos - bridgeState.point2).normalized,
-                        bridgeState.point2, self.room, gpState.aimWorldPos);
-                    silk.Release();
+                        bridgeState.point2, self.room, gpState.aimWorldPos, self);
+                    silk.DetachPhysicsOnly();
                     gpState.selectingBridge = false;
                 }
             }

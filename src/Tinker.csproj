@@ -5,14 +5,13 @@
     <LangVersion>11</LangVersion>
     <DebugType>portable</DebugType>
     
-    <Version>0.5.5</Version>
+    <Version>0.5.8</Version>
     <Description>The Tinker mod for Rain World</Description>
     <Authors>AbyssLasea</Authors>
 
-    <!-- Rain Meadow 联机支持(可选):默认关闭,未安装 Rain Meadow 也能正常运行。
-         安装 Rain Meadow 后,用 dotnet build -p:EnableRainMeadow=true 开启编译。
-         未开启时所有引用 Rain Meadow 类型的代码都会被条件编译排除。 -->
-    <EnableRainMeadow Condition="'$(EnableRainMeadow)' == ''">false</EnableRainMeadow>
+    <!-- Compile optional integration into normal releases. Runtime calls are isolated
+         behind a non-inlined bridge, so Rain Meadow is not required to play offline. -->
+    <EnableRainMeadow Condition="'$(EnableRainMeadow)' == ''">true</EnableRainMeadow>
     <DefineConstants Condition="'$(EnableRainMeadow)' == 'true'">$(DefineConstants);RAINMEADOW</DefineConstants>
 </PropertyGroup>
     

@@ -36,9 +36,12 @@ namespace tinker.Silk
         private int frameCounter;
         private float pullAcceleration, lastPullAcceleration;
         private float wavePhase, waveAmplitude, previousWaveAmplitude;
+        private readonly SilkDynamics.LaunchSpring launchSpring = new SilkDynamics.LaunchSpring();
+        private readonly SilkDynamics.LaunchTightening launchTightening = new SilkDynamics.LaunchTightening();
+        private SilkMode visualMode;
+        internal int ShotSequence { get; private set; }
         public int superJumpTimer = 0;
-        private float superJumpStartLength;
-        private const int SUPER_JUMP_DURATION = 6;
+        private bool wasSuperJumping;
         public float superJumpBaseLength;
 
         public SilkPhysics(Player player, ICollisionProvider collisionProvider = null)
@@ -60,10 +63,10 @@ namespace tinker.Silk
 
         public void Update()
         {
+            if (superJumpTimer > 0) wasSuperJumping = true;
             // Remote/synced mode: skip all physics, positions set externally via PullSilkState
             if (isRemote)
             {
-                lastPos = pos;
                 UpdateVisualMotion();
                 return;
             }
@@ -110,19 +113,7 @@ namespace tinker.Silk
 
         public void Shoot(Vector2 direction)
         {
-            if (!tinkerSilkData.RequestEnergy(player, 5f))
-            {
-                return;
-            }
-            ropeSegmentPoints.Clear();
-            segmentLastChanged.Clear();
-            segmentBridgeAttachments.Clear();
-
-            ResetState();
-            pos = lastPos = baseChunk.pos;
-            vel = direction.normalized * SHOOT_SPEED;
-            mode = SilkMode.ShootingOut;
-            idealRopeLength = MAX_ROPE_LENGTH;
+            BeginShot(direction, MAX_ROPE_LENGTH);
         }
 
         /// <summary>
@@ -131,34 +122,50 @@ namespace tinker.Silk
         /// </summary>
         public void ShootAtPosition(Vector2 worldPos)
         {
-            if (!tinkerSilkData.RequestEnergy(player, 5f))
-            {
-                return;
-            }
-
             Vector2 dir = worldPos - baseChunk.pos;
             float dist = dir.magnitude;
-            if (dist < 1f)
-            {
-                return;
-            }
+            if (dist < 1f) return;
+            BeginShot(dir, Mathf.Min(dist, MAX_ROPE_LENGTH));
+        }
+
+        private void BeginShot(Vector2 direction, float length)
+        {
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player)) return;
+            if (direction.sqrMagnitude < 0.0001f || !tinkerSilkData.RequestEnergy(player, 5f)) return;
             ropeSegmentPoints.Clear();
             segmentLastChanged.Clear();
             segmentBridgeAttachments.Clear();
 
             ResetState();
             pos = lastPos = baseChunk.pos;
-            vel = dir / dist * SHOOT_SPEED;
-            mode = SilkMode.ShootingOut;
-            idealRopeLength = Mathf.Min(dist, MAX_ROPE_LENGTH);
+            vel = direction.normalized * SHOOT_SPEED;
+            mode = visualMode = SilkMode.ShootingOut;
+            ShotSequence++;
+            launchSpring.Reset(1f);
+            idealRopeLength = length;
         }
 
         public void Release(bool instant = false)
         {
             if (mode != SilkMode.Retracted)
             {
+                // Snapshot once at the state transition, before the tip/path is reset.
+                // Cameras only render this room-owned animation; they never create it.
+                if (!instant && player.room != null)
+                {
+                    var path = new List<Vector2>(GetRopePath());
+                    bool recoil = wasSuperJumping || superJumpTimer > 0;
+                    Color color = new Color(0.9f, 0.9f, 0.9f);
+                    if (recoil) color = Color.Lerp(color, new Color(0.7f, 1f, 1f), 0.5f);
+                    else if (pullingObject) color = Color.Lerp(color, new Color(0.4f, 1f, 0.4f), 0.3f);
+                    // The path is player -> tip; recoil runs from the tip toward the released player end.
+                    path.Reverse();
+                    float width = Mathf.Lerp(1.2f, 0.6f, Mathf.Clamp01(Vector2.Distance(baseChunk.pos, pos) / 500f));
+                    BrokenSilkManager.TriggerFadeAnimation(path, player.room, recoil, color, width);
+                }
                 instantDisappear = instant;
                 mode = SilkMode.Retracted;
+                wasSuperJumping = false;
             }
             else if (instant) instantDisappear = true;
         }
@@ -182,6 +189,44 @@ namespace tinker.Silk
 
         private List<Vector2> _cachedRopePath = new List<Vector2>(52);
 
+        internal Vector2[] CopyNetworkBends() => ropeSegmentPoints.ToArray();
+
+        internal void ResetNetworkSilk()
+        {
+            Release(true);
+            ResetState();
+            ropeSegmentPoints.Clear();
+            segmentLastChanged.Clear();
+            segmentBridgeAttachments.Clear();
+            pos = lastPos = baseChunk.pos;
+        }
+
+        internal void ApplyNetworkSilk(SilkMode nextMode, Vector2 tip, Vector2 terrain,
+            float idealLength, float requestedLength, bool pulling, int jumpTimer,
+            bool instant, int sequence, Vector2[] bends, PhysicalObject target)
+        {
+            if (nextMode == SilkMode.Retracted && mode != SilkMode.Retracted) Release(instant);
+            if (sequence != ShotSequence)
+            {
+                ShotSequence = sequence;
+                launchSpring.Reset(1f);
+                visualMode = SilkMode.ShootingOut;
+                wasSuperJumping = false;
+            }
+            mode = nextMode;
+            pos = tip;
+            terrainStuckPos = terrain;
+            idealRopeLength = idealLength;
+            requestedRopeLength = requestedLength;
+            pullingObject = pulling;
+            superJumpTimer = jumpTimer;
+            instantDisappear = instant;
+            attachedObject = target;
+            attachedBridge = null;
+            ropeSegmentPoints.Clear();
+            if (bends != null) ropeSegmentPoints.AddRange(bends);
+        }
+
         public List<Vector2> GetRopePath(float timeStacker = 1f)
         {
             _cachedRopePath.Clear();
@@ -197,7 +242,7 @@ namespace tinker.Silk
                 float length = Vector2.Distance(from, to);
                 float spanSlack = slack * length / Mathf.Max(pathLength, 0.001f);
                 float sag = Mathf.Min(0.5f, Mathf.Sqrt(3f * length * spanSlack / 8f));
-                int count = Mathf.Clamp(Mathf.CeilToInt(length / 8f), 2, 64);
+                int count = Mathf.Clamp(Mathf.CeilToInt(length / 8f), 12, 64);
                 Vector2 normal = Custom.PerpendicularVector((to - from).normalized);
                 int spanStart = _cachedRopePath.Count;
                 bool blocked = false;
@@ -207,6 +252,11 @@ namespace tinker.Silk
                     float t = (float)i / count;
                     Vector2 point = Vector2.Lerp(from, to, t) + Vector2.down * (4f * t * (1f - t) * sag);
                     point += normal * SilkDynamics.Wave(t, wavePhase - 0.55f * (1f - timeStacker), amplitude);
+                    // Same signed launch wave and impact tightening as bridge shots.
+                    float launch = mode == SilkMode.ShootingOut
+                        ? launchSpring.Offset(t, length, timeStacker)
+                        : Attached ? launchTightening.Offset(t, length, timeStacker) : 0f;
+                    point += normal * launch;
                     if (player.room != null && collisionProvider.RayTraceTilesForTerrainReturnFirstSolid(player.room, previous, point).HasValue)
                     { blocked = true; break; }
                     _cachedRopePath.Add(point);
@@ -223,6 +273,19 @@ namespace tinker.Silk
 
         private void UpdateVisualMotion()
         {
+            // Synced remote shots enter here without calling BeginShot locally.
+            if (mode == SilkMode.ShootingOut && visualMode != SilkMode.ShootingOut)
+            {
+                ShotSequence++;
+                launchSpring.Reset(1f);
+            }
+            if (mode == SilkMode.ShootingOut || visualMode == SilkMode.ShootingOut)
+                launchSpring.Update();
+            if (Attached && visualMode == SilkMode.ShootingOut)
+                launchTightening.Begin(launchSpring);
+            else if (Attached)
+                launchTightening.Update();
+            visualMode = mode;
             previousWaveAmplitude = waveAmplitude;
             float motion = (baseChunk.pos - baseChunk.lastPos).magnitude;
             float pluck = Mathf.Abs(pullAcceleration - lastPullAcceleration) * 0.35f;
@@ -233,12 +296,17 @@ namespace tinker.Silk
 
         private void ResetState()
         {
-            mode = SilkMode.Retracted;
+            mode = visualMode = SilkMode.Retracted;
+            launchSpring.Reset();
+            launchTightening.Begin(launchSpring);
+            wavePhase = waveAmplitude = previousWaveAmplitude = 0f;
+            pullAcceleration = lastPullAcceleration = 0f;
             attachedObject = null;
             attachedBridge = null;
             requestedRopeLength = elastic = 0f;
             pullingObject = returning = false;
             instantDisappear = false;
+            wasSuperJumping = false;
         }
 
         private void UpdateRetracted() => pos = lastPos = baseChunk.pos;
@@ -277,7 +345,11 @@ namespace tinker.Silk
             {
                 returning = true;
                 pos += (baseChunk.pos - pos).normalized * 5f;
-                if (Custom.DistLess(baseChunk.pos, pos, 40f)) ResetState();
+                if (Custom.DistLess(baseChunk.pos, pos, 40f))
+                {
+                    Release();
+                    ResetState();
+                }
             }
         }
 
@@ -355,7 +427,8 @@ namespace tinker.Silk
             Vector2 endForce = (lastPoint - pos).normalized * tension;
             if (attachedBridge != null && attachedBridge.IsActive)
                 attachedBridge.ApplyForceAt(pos, endForce, 24f);
-            else if (attachedObject != null && attachedObject.TotalMass > 0f)
+            else if (attachedObject != null && attachedObject.TotalMass > 0f &&
+                RainMeadow.RainMeadowBridge.CanMoveObject(attachedObject))
             {
                 Vector2 acceleration = Vector2.ClampMagnitude(endForce / attachedObject.TotalMass, 8f);
                 foreach (BodyChunk chunk in attachedObject.bodyChunks) chunk.vel += acceleration;
@@ -446,6 +519,7 @@ namespace tinker.Silk
 
         private void PullAttachedObject()
         {
+            if (!RainMeadow.RainMeadowBridge.CanMoveObject(attachedObject)) return;
             Vector2 dir = (baseChunk.pos - pos).normalized;
             if (Custom.DistLess(baseChunk.pos, pos, 20f)) { pullingObject = false; return; }
             for (int i = 0; i < attachedObject.bodyChunks.Length; i++)

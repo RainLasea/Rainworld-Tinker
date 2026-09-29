@@ -32,15 +32,20 @@ namespace Tinker.Silk.Bridge
 
         public SilkBridge ignoreBridgeForD1 = null;
 
-        private Vector2? aimTarget = null;
-        private const float AIM_TARGET_PRIORITY_DISTANCE = 150f;
+        private readonly SilkTargeting targeting = new SilkTargeting();
+        private SilkTargeting.Target shotTarget;
+        private Room flightRoom;
+        private int flightTicks;
+        private const int MAX_FLIGHT_TICKS = 30;
 
         private const float SHOOT_SPEED = 50f;
         private const float GRAVITY = 0.9f;
-        private IntVector2[] _cachedRtList = new IntVector2[20];
 
         public void Activate(Vector2 pos)
         {
+            d1AttachedObject = d2AttachedObject = null;
+            d1AttachedBridge = d2AttachedBridge = null;
+            ignoreBridgeForD1 = null;
             active = true;
             point2 = pos;
             LaunchSpring.Reset();
@@ -52,7 +57,9 @@ namespace Tinker.Silk.Bridge
             attachedBridge = null;
             attachedSegIndex = -1;
             attachedT = 0f;
-            aimTarget = null;
+            shotTarget = default;
+            flightRoom = null;
+            flightTicks = 0;
         }
 
         public void AttachD2ToBridge(SilkBridge bridge, int segIndex, float t)
@@ -132,29 +139,29 @@ namespace Tinker.Silk.Bridge
             d1AttachedBridge = null;
             d2AttachedObject = null;
             d2AttachedBridge = null;
-            aimTarget = null;
+            ignoreBridgeForD1 = null;
+            shotTarget = default;
+            flightRoom = null;
+            flightTicks = 0;
         }
 
-        public void ShootVirtualSilk(Vector2 direction, Vector2 startPos, Room room, Vector2? targetPos)
+        public void ShootVirtualSilk(Vector2 direction, Vector2 startPos, Room room, Vector2? targetPos,
+            Player player = null)
         {
             if (room == null) return;
-
             virtualSilkActive = true;
             previousSilkPos = virtualSilkPos = startPos;
             LaunchSpring.Reset(1f);
-
-
-            aimTarget = targetPos;
-
-            if (targetPos.HasValue)
-            {
-                Vector2 dir = targetPos.Value - startPos;
-                virtualSilkVel = dir.sqrMagnitude > 0.0001f ? dir.normalized * SHOOT_SPEED : Vector2.zero;
-            }
-            else
-            {
-                virtualSilkVel = direction.normalized * SHOOT_SPEED;
-            }
+            flightRoom = room;
+            flightTicks = 0;
+            shotTarget = targetPos.HasValue
+                ? targeting.Select(player, room, startPos, targetPos.Value, d2AttachedBridge, d2AttachedObject)
+                : default;
+            Vector2 aim = shotTarget.Valid ? shotTarget.Point - startPos :
+                targetPos.HasValue ? targetPos.Value - startPos : direction;
+            virtualSilkVel = aim.sqrMagnitude > 0.0001f ? aim.normalized * SHOOT_SPEED : Vector2.zero;
+            d1AttachedBridge = null;
+            d1AttachedObject = null;
             animating = true;
             hasTarget = false;
         }
@@ -162,41 +169,28 @@ namespace Tinker.Silk.Bridge
         public bool TryGetVirtualSilkPreviewHit(Player player, Vector2 targetPos, out Vector2 hitPoint)
         {
             hitPoint = Vector2.zero;
-            if (player?.room == null || !active) return false;
+            if (player?.room == null || !active || animating) return false;
+            var target = targeting.Select(player, player.room, point2, targetPos, d2AttachedBridge, d2AttachedObject);
+            if (target.Valid)
+            {
+                hitPoint = target.Point;
+                return true;
+            }
 
-            BridgeModeState preview = new BridgeModeState();
+            // An empty aim retains the original free projectile. Simulate the
+            // same step function used by the real shot, including its lifetime.
+            var preview = new BridgeModeState();
             preview.Activate(point2);
             preview.d2AttachedBridge = d2AttachedBridge;
             preview.d2AttachedObject = d2AttachedObject;
-            preview.ShootVirtualSilk(targetPos - point2, point2, player.room, targetPos);
-
-            const int maxSteps = 30;
-            for (int step = 0; step < maxSteps; step++)
+            preview.ShootVirtualSilk(targetPos - point2, point2, player.room, null, player);
+            for (int step = 0; step < MAX_FLIGHT_TICKS && preview.virtualSilkActive; step++)
             {
-                Vector2 lastPos = preview.virtualSilkPos;
-                preview.virtualSilkVel.y -= GRAVITY;
-                preview.virtualSilkPos += preview.virtualSilkVel;
-
-                bool prioritizeTerrain = preview.ShouldPrioritizeTerrainCollision();
-                bool hit = prioritizeTerrain
-                    ? preview.TryHandleTerrainCollision(player, lastPos, preview.virtualSilkPos) ||
-                      preview.TryHandleBeamCollision(player, lastPos) ||
-                      preview.TryHandleObjectCollision(player)
-                    : preview.TryHandleBridgeCollision(player, lastPos) ||
-                      preview.TryHandleTerrainCollision(player, lastPos, preview.virtualSilkPos) ||
-                      preview.TryHandleObjectCollision(player) ||
-                      preview.TryHandleBeamCollision(player, lastPos);
-
-                if (hit)
-                {
-                    hitPoint = preview.targetLD1;
-                    return true;
-                }
-
-                if (Vector2.Dot(Custom.DirVec(preview.point2, preview.virtualSilkPos), preview.virtualSilkVel.normalized) < -0.6f)
-                    return false;
+                preview.StepVirtualSilk(player);
+                if (!preview.hasTarget) continue;
+                hitPoint = preview.targetLD1;
+                return true;
             }
-
             return false;
         }
 
@@ -235,218 +229,72 @@ namespace Tinker.Silk.Bridge
             {
                 previousSilkPos = virtualSilkPos;
                 LaunchSpring.Update();
-                Vector2 lastPos = virtualSilkPos;
+                StepVirtualSilk(player);
+                if (!virtualSilkActive && !hasTarget)
+                    SilkBridgeManager.CancelPlayerBuildMode(player);
+            }
+        }
+
+        private void StepVirtualSilk(Player player)
+        {
+            if (player?.room != flightRoom || flightRoom == null || ++flightTicks > MAX_FLIGHT_TICKS)
+            {
+                virtualSilkActive = false;
+                return;
+            }
+            Vector2 lastPos = virtualSilkPos;
+            bool arriving = false;
+            if (shotTarget.Valid)
+            {
+                if (!shotTarget.Refresh(flightRoom) ||
+                    (shotTarget.Point - point2).sqrMagnitude > SilkTargetGeometry.MaxRange * SilkTargetGeometry.MaxRange)
+                {
+                    virtualSilkActive = false;
+                    return;
+                }
+                Vector2 delta = shotTarget.Point - lastPos;
+                arriving = delta.sqrMagnitude <= SHOOT_SPEED * SHOOT_SPEED;
+                virtualSilkVel = delta.normalized * SHOOT_SPEED;
+                virtualSilkPos = arriving ? shotTarget.Point : lastPos + virtualSilkVel;
+            }
+            else
+            {
                 virtualSilkVel.y -= GRAVITY;
                 virtualSilkPos += virtualSilkVel;
-
-
-                bool prioritizeTerrain = ShouldPrioritizeTerrainCollision();
-
-                if (prioritizeTerrain)
-                {
-                    if (TryHandleTerrainCollision(player, lastPos, virtualSilkPos) ||
-                        TryHandleBeamCollision(player, lastPos) ||
-                        TryHandleObjectCollision(player))
-                    {
-                        return;
-                    }
-                }
-                else
-                {
-                    if (TryHandleBridgeCollision(player, lastPos) ||
-                        TryHandleTerrainCollision(player, lastPos, virtualSilkPos) ||
-                        TryHandleObjectCollision(player) ||
-                        TryHandleBeamCollision(player, lastPos))
-                    {
-                        return;
-                    }
-                }
-
-                HandleReturnLogic(player);
-            }
-        }
-
-        private bool ShouldPrioritizeTerrainCollision()
-        {
-            if (!aimTarget.HasValue) return false;
-
-            float distanceToAim = Vector2.Distance(virtualSilkPos, aimTarget.Value);
-
-            if (distanceToAim < AIM_TARGET_PRIORITY_DISTANCE)
-            {
-                Vector2 toAim = (aimTarget.Value - virtualSilkPos).normalized;
-                float dot = Vector2.Dot(virtualSilkVel.normalized, toAim);
-
-                if (dot > 0.5f)
-                {
-                    return true;
-                }
             }
 
-            return false;
-        }
-
-        private bool TryHandleBridgeCollision(Player player, Vector2 lastPos)
-        {
-            if (player?.room == null) return false;
-
-            if (aimTarget.HasValue && ShouldPrioritizeTerrainCollision())
+            // Terrain always blocks, including a target that moves behind a wall.
+            bool wallHit = SilkTargeting.TerrainHit(flightRoom, lastPos, virtualSilkPos, out var wall);
+            if (shotTarget.Valid)
             {
-                return false;
+                if (wallHit && (!arriving || (wall - shotTarget.Point).sqrMagnitude > 0.01f))
+                    FinishHit(new SilkTargeting.Target { Valid = true, Point = wall });
+                else if (arriving) FinishHit(shotTarget);
+            }
+            else
+            {
+                var hit = targeting.Trace(player, flightRoom, lastPos, virtualSilkPos, point2,
+                    d2AttachedBridge, d2AttachedObject);
+                if (hit.Valid) FinishHit(hit);
+                else if (wallHit) virtualSilkActive = false;
             }
 
-            SilkBridge ignoreD2Bridge = d2AttachedBridge;
-
-            var bridges = SilkBridgeManager.GetBridgesInRoom(player.room);
-            if (bridges == null || bridges.Count == 0) return false;
-
-            SilkBridge closestBridge = null;
-            Vector2 closestHitPoint = Vector2.zero;
-            float closestDist = float.MaxValue;
-
-            foreach (var bridge in bridges)
-            {
-                if (bridge == null || bridge.room != player.room) continue;
-
-                if (ignoreD2Bridge != null && bridge == ignoreD2Bridge)
-                {
-                    continue;
-                }
-
-                var path = bridge.GetRenderPath();
-                if (path == null || path.Count < 2) continue;
-
-                for (int i = 0; i < path.Count - 1; i++)
-                {
-                    Vector2 segStart = path[i];
-                    Vector2 segEnd = path[i + 1];
-
-                    if (SilkBridgeManager.SegmentIntersection(lastPos, virtualSilkPos, segStart, segEnd, out Vector2 hitPoint, out float t))
-                    {
-                        float dist = Vector2.Distance(lastPos, hitPoint);
-                        if (dist < closestDist)
-                        {
-                            closestDist = dist;
-                            closestBridge = bridge;
-                            closestHitPoint = hitPoint;
-                        }
-                    }
-                }
-            }
-
-            if (closestBridge != null)
-            {
-                targetLD1 = closestHitPoint;
-                hasTarget = true;
-                d1AttachedBridge = closestBridge;
-                d1AttachedObject = null;
-                animating = true;
-                virtualSilkPos = closestHitPoint;
+            if (virtualSilkActive && ((virtualSilkPos - point2).sqrMagnitude >
+                    SilkTargetGeometry.MaxRange * SilkTargetGeometry.MaxRange ||
+                Vector2.Dot(Custom.DirVec(point2, virtualSilkPos), virtualSilkVel.normalized) < -0.6f))
                 virtualSilkActive = false;
-                return true;
-            }
-
-            return false;
         }
 
-        private bool TryHandleTerrainCollision(Player player, Vector2 lastPos, Vector2 curPos)
+        private void FinishHit(SilkTargeting.Target target)
         {
-            if (player?.room == null) return false;
-
-            IntVector2? hitTile = SharedPhysics.RayTraceTilesForTerrainReturnFirstSolid(player.room, lastPos, curPos);
-            if (!hitTile.HasValue) return false;
-
-            FloatRect tileRect = player.room.TileRect(hitTile.Value);
-            Vector2 precise = GetTileCollisionPoint(lastPos, curPos, tileRect);
-
-            targetLD1 = precise;
-            hasTarget = true;
-            d1AttachedObject = null;
-            d1AttachedBridge = null;
-            animating = true;
-            virtualSilkPos = precise;
             virtualSilkActive = false;
-            return true;
-        }
-
-        private bool TryHandleObjectCollision(Player player)
-        {
-            if (player.room == null) return false;
-
-            foreach (var obj in player.room.physicalObjects)
-            {
-                foreach (var item in obj)
-                {
-                    if (item == player) continue;
-
-                    bool ok = item is Weapon || item is DangleFruit || item is SporePlant ||
-                              item is DataPearl || item is Rock || item is ScavengerBomb ||
-                              item is Spear || item is FirecrackerPlant;
-                    if (!ok) continue;
-
-                    foreach (var chunk in item.bodyChunks)
-                    {
-                        if (Vector2.Distance(virtualSilkPos, chunk.pos) < chunk.rad + 5f)
-                        {
-                            targetLD1 = chunk.pos;
-                            hasTarget = true;
-                            d1AttachedObject = item;
-                            d1AttachedBridge = null;
-                            animating = true;
-                            virtualSilkPos = chunk.pos;
-                            virtualSilkActive = false;
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        }
-
-        private bool TryHandleBeamCollision(Player player, Vector2 lastPos)
-        {
-            int rayCount = SharedPhysics.RayTracedTilesArray(lastPos, virtualSilkPos, _cachedRtList);
-
-            for (int i = 0; i < rayCount; i++)
-            {
-                if (player.room.GetTile(_cachedRtList[i]).horizontalBeam)
-                {
-                    float midY = player.room.MiddleOfTile(_cachedRtList[i]).y;
-                    float crossX = Custom.HorizontalCrossPoint(lastPos, virtualSilkPos, midY).x;
-                    float clampedX = Mathf.Clamp(crossX,
-                        player.room.MiddleOfTile(_cachedRtList[i]).x - 10f,
-                        player.room.MiddleOfTile(_cachedRtList[i]).x + 10f);
-
-                    Vector2 hitPoint = new Vector2(clampedX, midY);
-                    targetLD1 = hitPoint;
-                    hasTarget = true;
-                    d1AttachedObject = null;
-                    d1AttachedBridge = null;
-                    animating = true;
-                    virtualSilkPos = hitPoint;
-                    virtualSilkActive = false;
-                    return true;
-                }
-                if (player.room.GetTile(_cachedRtList[i]).verticalBeam)
-                {
-                    float midX = player.room.MiddleOfTile(_cachedRtList[i]).x;
-                    float crossY = Custom.VerticalCrossPoint(lastPos, virtualSilkPos, midX).y;
-                    float clampedY = Mathf.Clamp(crossY,
-                        player.room.MiddleOfTile(_cachedRtList[i]).y - 10f,
-                        player.room.MiddleOfTile(_cachedRtList[i]).y + 10f);
-
-                    Vector2 hitPoint = new Vector2(midX, clampedY);
-                    targetLD1 = hitPoint;
-                    hasTarget = true;
-                    d1AttachedObject = null;
-                    d1AttachedBridge = null;
-                    animating = true;
-                    virtualSilkPos = hitPoint;
-                    virtualSilkActive = false;
-                    return true;
-                }
-            }
-            return false;
+            if ((target.Point - point2).sqrMagnitude < SilkTargetGeometry.MinRange * SilkTargetGeometry.MinRange)
+                return;
+            targetLD1 = virtualSilkPos = target.Point;
+            d1AttachedBridge = target.Bridge;
+            d1AttachedObject = target.Chunk?.owner;
+            hasTarget = true;
+            animating = true;
         }
 
         public void SetD1TargetBridge(SilkBridge bridge, Vector2 hitPoint)
@@ -490,6 +338,18 @@ namespace Tinker.Silk.Bridge
 
         public Vector2 GetRenderD1Position(float timeStacker = 1f) => Vector2.Lerp(previousSilkPos, virtualSilkPos, timeStacker);
 
+        internal void ApplyNetworkPreview(bool building, bool firing, Vector2 start, Vector2 tip)
+        {
+            if (firing && !virtualSilkActive) LaunchSpring.Reset(1f);
+            previousSilkPos = virtualSilkActive ? virtualSilkPos : tip;
+            point2 = start;
+            virtualSilkPos = tip;
+            active = building;
+            virtualSilkActive = firing;
+            animating = hasTarget = false;
+            LaunchSpring.Update();
+        }
+
         public Vector2 GetLaunchVisualPoint(float t, float timeStacker)
         {
             Vector2 start = GetRenderD1Position(timeStacker);
@@ -509,26 +369,6 @@ namespace Tinker.Silk.Bridge
             return point2;
         }
 
-        private void HandleReturnLogic(Player player)
-        {
-            if (Vector2.Dot(Custom.DirVec(point2, virtualSilkPos), virtualSilkVel.normalized) < -0.6f)
-            {
-                SilkBridgeManager.CancelPlayerBuildMode(player);
-            }
-        }
-
-        private Vector2 GetTileCollisionPoint(Vector2 start, Vector2 end, FloatRect tileRect)
-        {
-            FloatRect expanded = tileRect.Grow(2f);
-            FloatRect collision = Custom.RectCollision(end, start, expanded);
-
-            Vector2 collisionPoint = new Vector2(collision.left, collision.bottom);
-            collisionPoint.x = Mathf.Clamp(collisionPoint.x, tileRect.left, tileRect.right);
-            collisionPoint.y = Mathf.Clamp(collisionPoint.y, tileRect.bottom, tileRect.top);
-
-            return collisionPoint;
-        }
-
         public static class SilkBridgeManager
         {
             private static readonly Dictionary<Room, List<SilkBridge>> roomBridges = new Dictionary<Room, List<SilkBridge>>();
@@ -538,6 +378,7 @@ namespace Tinker.Silk.Bridge
             {
                 On.RainWorldGame.ShutDownProcess += RainWorldGame_ShutDownProcess;
                 On.Room.Loaded += Room_Loaded;
+                On.Room.Unloaded += Room_Unloaded;
                 On.Room.Update += Room_Update;
             }
 
@@ -545,6 +386,7 @@ namespace Tinker.Silk.Bridge
             {
                 On.RainWorldGame.ShutDownProcess -= RainWorldGame_ShutDownProcess;
                 On.Room.Loaded -= Room_Loaded;
+                On.Room.Unloaded -= Room_Unloaded;
                 On.Room.Update -= Room_Update;
                 ClearAllBridges();
             }
@@ -562,12 +404,17 @@ namespace Tinker.Silk.Bridge
 
             public static void CreateBridge(Player player, Vector2 point1, Vector2 point2)
             {
-                if (player?.room == null) return;
+                if (player?.room == null || !tinker.Silk.RainMeadow.RainMeadowBridge.CanCreateBridge(player)) return;
 
                 float straightDistance = Vector2.Distance(point1, point2);
+                if (straightDistance > 1200f || straightDistance < SilkTargetGeometry.MinRange) return;
 
                 float cost = 5f + (straightDistance / 250f) * 10f;
                 cost = Mathf.Min(cost, 50f);
+
+                float energyBefore = tinkerSilkData.GetEnergy(player);
+                bool exhaustedBefore = tinkerSilkData.GetExhausted(player);
+                int foodBefore = player.playerState.foodInStomach;
 
                 if (!tinkerSilkData.RequestEnergy(player, cost))
                 {
@@ -614,6 +461,22 @@ namespace Tinker.Silk.Bridge
                 if (bridgeState != null) bridge.BeginLaunchTightening(bridgeState.LaunchSpring);
                 bridge.Update();
 
+                float energyPaid = energyBefore - tinkerSilkData.GetEnergy(player);
+                int foodPaid = foodBefore - player.playerState.foodInStomach;
+                if (tinker.Silk.RainMeadow.RainMeadowBridge.SubmitBridge(player, bridge, () =>
+                {
+                    if (player.slatedForDeletetion || tinker.Silk.RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player)) return;
+                    float refundedEnergy = tinkerSilkData.GetEnergy(player) + energyPaid;
+                    bool exhausted = foodPaid > 0 ? exhaustedBefore : tinkerSilkData.GetExhausted(player);
+                    if (foodPaid > 0) player.AddFood(foodPaid);
+                    // AddFood also gives silk energy; restore the payment balance once.
+                    tinkerSilkData.ApplyNetworkEnergy(player, refundedEnergy, exhausted);
+                }))
+                {
+                    CancelPlayerBuildMode(player);
+                    return;
+                }
+
                 if (!roomBridges.ContainsKey(player.room))
                     roomBridges[player.room] = new List<SilkBridge>();
 
@@ -630,6 +493,13 @@ namespace Tinker.Silk.Bridge
             {
                 return room == null ? new List<SilkBridge>() :
                        roomBridges.GetValueOrDefault(room, new List<SilkBridge>());
+            }
+
+            internal static List<SilkBridge> EnsureBridgesInRoom(Room room)
+            {
+                if (!roomBridges.TryGetValue(room, out var bridges))
+                    roomBridges.Add(room, bridges = new List<SilkBridge>());
+                return bridges;
             }
 
             public static void ClearBridgesInRoom(Room room)
@@ -784,12 +654,20 @@ namespace Tinker.Silk.Bridge
                     roomBridges[self] = new List<SilkBridge>();
             }
 
+            private static void Room_Unloaded(On.Room.orig_Unloaded orig, Room self)
+            {
+                tinker.Silk.RainMeadow.RainMeadowBridge.UnloadRoom(self);
+                roomBridges.Remove(self);
+                orig(self);
+            }
+
             private static void Room_Update(On.Room.orig_Update orig, Room self)
             {
                 orig(self);
                 if (self.game == null) return;
 
-                if (roomBridges.ContainsKey(self))
+                bool networkDriven = tinker.Silk.RainMeadow.RainMeadowBridge.UpdateRoom(self);
+                if (!networkDriven && roomBridges.ContainsKey(self))
                 {
                     var bridges = roomBridges[self];
                     SilkBridge.UpdateNetwork(bridges);
@@ -799,6 +677,7 @@ namespace Tinker.Silk.Bridge
                 {
                     if (player?.realizedCreature is Player p && p.room == self)
                     {
+                        if (tinker.Silk.RainMeadow.RainMeadowBridge.IsOnlineAndRemote(p)) continue;
                         var bridgeState = GetBridgeModeState(p);
 
                         if (bridgeState?.active == true)

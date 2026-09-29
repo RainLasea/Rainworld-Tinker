@@ -1,127 +1,159 @@
-﻿using RWCustom;
+using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using RWCustom;
 using Tinker.Silk.Bridge;
 using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Silk
 {
+    // The player owns locomotion. Silk supplies a continuous beam surface to
+    // vanilla's animation/body-mode queries; it never writes a second jump.
     public static class SilkClimb
     {
-        private enum ClimbMode
+        private sealed class ClimbState
         {
-            VerticalClimb,
-            HorizontalClimb
-        }
-
-        private class SwitchingState
-        {
-            public IClimbableSilk toSilk;
-            public int toSeg;
-            public float toT;
-            public Vector2 fromPos;
-            public int counter;
-            public int duration = 8;
-            public float Progress => Mathf.Clamp01((float)counter / duration);
-        }
-
-        private class ClimbState
-        {
-            public IClimbableSilk ClimbTarget;
-            public int SegmentIndex;
+            public IClimbableSilk Target;
+            public Room Room;
+            public int Segment;
             public float T;
-            public ClimbMode CurrentClimbMode;
-            public bool IsHanging;
-            public Vector2 smoothedAttachPoint;
-            public bool Active => ClimbTarget != null && ClimbTarget.IsActive;
-            public SwitchingState switching;
-            public int switchCooldown;
+            public bool Vertical;
+            public IClimbableSilk PreviousTarget;
+            public Vector2 SwitchPoint;
+            public Vector2 SwitchInput;
+            public bool RouteInputActive;
+            public int RouteSign;
+            public Vector2[] RoutingPoints;
+            public Vector2[] CandidatePoints;
+            public float StepDistance;
+            public bool WasMoving;
+            public Vector2[] Points;
+            public Vector2 LastSupport;
+            public SilkClimbTransfer Transfer;
         }
 
-        private static ConditionalWeakTable<Player, ClimbState> climbStates = new ConditionalWeakTable<Player, ClimbState>();
+        private static ConditionalWeakTable<Player, ClimbState> states = new();
+        private static readonly FieldInfo noGrabCounter = typeof(Player).GetField("noGrabCounter",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static bool initialized;
+        private const int SurfaceSubdivisions = 4;
 
-        private static FieldInfo noGrabCounterField;
+        public static bool IsClimbing(Player player) => player != null && !RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player) &&
+            states.TryGetValue(player, out var state) && Valid(player, state);
 
-        private static int GetNoGrabCounter(Player player)
-        {
-            if (noGrabCounterField == null)
-            {
-                noGrabCounterField = typeof(Player).GetField("noGrabCounter", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            }
-            return (int)noGrabCounterField.GetValue(player);
-        }
+        private static bool Valid(Player player, ClimbState state) => state.Target != null &&
+            state.Target.IsActive && state.Target.SegmentCount > 0 && player.room != null &&
+            player.room == state.Room && (!(state.Target is SilkBridge bridge) || bridge.room == player.room);
 
-        private static void SetNoGrabCounter(Player player, int value)
-        {
-            if (noGrabCounterField == null)
-            {
-                noGrabCounterField = typeof(Player).GetField("noGrabCounter", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            }
-            noGrabCounterField.SetValue(player, value);
-        }
-
-        public static bool IsClimbing(Player player)
-        {
-            return climbStates.TryGetValue(player, out var state) && state.Active;
-        }
-
-        public static void AttachPlayerToSilk(Player player, IClimbableSilk silk, int seg, float t)
-        {
-            if (GetNoGrabCounter(player) > 0) return;
-            var state = climbStates.GetOrCreateValue(player);
-            if (state.switching != null) return;
-
-            state.ClimbTarget = silk;
-            state.SegmentIndex = seg;
-            state.T = t;
-            silk.ApplyClimbForce(silk.GetPointOnSegment(seg, t),
-                Vector2.ClampMagnitude(player.mainBodyChunk.vel * (player.TotalMass * 0.35f), 8f));
-            player.mainBodyChunk.vel *= 0.3f;
-
-            state.switching = new SwitchingState
-            {
-                toSilk = silk,
-                toSeg = seg,
-                toT = t,
-                duration = 8,
-                counter = 0,
-                fromPos = player.mainBodyChunk.pos
-            };
-
-            player.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, player.mainBodyChunk);
-        }
-
-        public static void DetachPlayerFromSilk(Player player)
-        {
-            if (player == null) return;
-            if (climbStates.TryGetValue(player, out var state))
-            {
-                state.ClimbTarget = null;
-                state.switching = null;
-                SetNoGrabCounter(player, 15);
-            }
-
-            if (player.bodyMode == Player.BodyModeIndex.ClimbingOnBeam)
-            {
-                player.animation = Player.AnimationIndex.None;
-                player.bodyMode = Player.BodyModeIndex.Default;
-            }
-        }
+        internal static bool BeamAnimation(Player.AnimationIndex animation) =>
+            animation == Player.AnimationIndex.ClimbOnBeam || animation == Player.AnimationIndex.HangFromBeam ||
+            animation == Player.AnimationIndex.StandOnBeam || animation == Player.AnimationIndex.GetUpOnBeam ||
+            animation == Player.AnimationIndex.GetUpToBeamTip || animation == Player.AnimationIndex.BeamTip ||
+            animation == Player.AnimationIndex.HangUnderVerticalBeam;
 
         public static void Init()
         {
+            if (initialized) return;
+            SilkBeamAdapter.Init();
+            On.Player.Update += Player_Update;
             On.Player.UpdateAnimation += Player_UpdateAnimation;
             On.Player.UpdateBodyMode += Player_UpdateBodyMode;
+            On.Player.Jump += Player_Jump;
             On.Player.Die += Player_Die;
+            initialized = true;
         }
 
         public static void Cleanup()
         {
+            if (!initialized) return;
+            On.Player.Update -= Player_Update;
             On.Player.UpdateAnimation -= Player_UpdateAnimation;
             On.Player.UpdateBodyMode -= Player_UpdateBodyMode;
+            On.Player.Jump -= Player_Jump;
             On.Player.Die -= Player_Die;
-            climbStates = new ConditionalWeakTable<Player, ClimbState>();
+            SilkBeamAdapter.Cleanup();
+            states = new ConditionalWeakTable<Player, ClimbState>();
+            initialized = false;
+        }
+
+        public static void AttachPlayerToSilk(Player player, IClimbableSilk silk, int seg, float t)
+        {
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player) || player?.room == null || !player.Consious || silk == null || !silk.IsActive ||
+                silk.SegmentCount < 1 || (int)noGrabCounter.GetValue(player) > 0 || IsClimbing(player)) return;
+            if (silk is SilkBridge otherRoom && otherRoom.room != player.room) return;
+            seg = Mathf.Clamp(seg, 0, silk.SegmentCount - 1);
+            t = Mathf.Clamp01(t);
+            Vector2 point = silk.GetPointOnSegment(seg, t);
+            if (!player.room.VisualContact(player.mainBodyChunk.pos, point)) return;
+            var state = states.GetOrCreateValue(player);
+            state.Target = silk;
+            state.Room = player.room;
+            state.Segment = seg;
+            state.T = t;
+            state.Vertical = VerticalAt(silk, seg, false);
+            state.PreviousTarget = null;
+            state.RouteInputActive = false;
+            state.Transfer = default;
+            state.StepDistance = 0f;
+            state.WasMoving = false;
+            state.LastSupport = point;
+            UpdateSurface(state);
+            if (silk is SilkBridge bridge)
+                bridge.ExciteMotion(seg, t, player.mainBodyChunk.vel * player.TotalMass * 1.1f);
+            player.bodyMode = Player.BodyModeIndex.ClimbingOnBeam;
+            // Vanilla's beam grab paths keep animationFrame. Its setter is
+            // protected in the running game, despite the public reference facade.
+            player.standing = true;
+            if (state.Vertical)
+            {
+                player.animation = Player.AnimationIndex.ClimbOnBeam;
+                player.flipDirection = player.mainBodyChunk.pos.x < point.x ? -1 : 1;
+                player.mainBodyChunk.vel = Vector2.zero;
+                player.mainBodyChunk.pos.x = point.x;
+            }
+            else
+            {
+                // Grabbing from below starts hanging, exactly as a horizontal pole.
+                player.animation = Player.AnimationIndex.HangFromBeam;
+                player.mainBodyChunk.vel.y = 0f;
+                player.bodyChunks[1].vel.y *= 0.25f;
+                player.mainBodyChunk.pos.y = point.y;
+            }
+            player.room.PlaySound(SoundID.Slugcat_Grab_Beam, player.mainBodyChunk);
+        }
+
+        public static void DetachPlayerFromSilk(Player player) => Release(player, true, 10);
+
+        private static void Release(Player player, bool clearAnimation, int grabDelay)
+        {
+            if (player == null || !states.TryGetValue(player, out var state) || state.Target == null) return;
+            state.Target = null;
+            state.PreviousTarget = null;
+            state.Room = null;
+            state.Transfer = default;
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player)) return;
+            noGrabCounter.SetValue(player, Math.Max((int)noGrabCounter.GetValue(player), grabDelay));
+            if (clearAnimation && BeamAnimation(player.animation)) player.animation = Player.AnimationIndex.None;
+            if (player.bodyMode == Player.BodyModeIndex.ClimbingOnBeam && !BeamAnimation(player.animation))
+                player.bodyMode = Player.BodyModeIndex.Default;
+        }
+
+        private static void Player_Update(On.Player.orig_Update orig, Player self, bool eu)
+        {
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self))
+            {
+                states.Remove(self);
+                orig(self, eu);
+                return;
+            }
+            if (states.TryGetValue(self, out var state) && state.Target != null &&
+                (!Valid(self, state) || !self.Consious || self.enteringShortCut.HasValue || self.inShortcut || self.grabbedBy.Count > 0))
+                DetachPlayerFromSilk(self);
+            orig(self, eu);
+            if (states.TryGetValue(self, out state) && state.Target != null &&
+                (!Valid(self, state) || !self.Consious || self.enteringShortCut.HasValue || self.inShortcut || !BeamAnimation(self.animation)))
+                DetachPlayerFromSilk(self);
         }
 
         private static void Player_Die(On.Player.orig_Die orig, Player self)
@@ -132,380 +164,375 @@ namespace tinker.Silk
 
         private static void Player_UpdateAnimation(On.Player.orig_UpdateAnimation orig, Player self)
         {
-            var animation = self.animation;
-            bool climbing = animation == Player.AnimationIndex.ClimbOnBeam;
-            bool standing = animation == Player.AnimationIndex.StandOnBeam;
-            bool hanging = animation == Player.AnimationIndex.HangFromBeam;
-            if ((!climbing && !standing && !hanging) || !IsClimbing(self))
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self))
             {
+                states.Remove(self);
                 orig(self);
                 return;
             }
+            if (!states.TryGetValue(self, out var state) || !Valid(self, state) || !self.Consious || !BeamAnimation(self.animation))
+            {
+                Release(self, false, 10);
+                orig(self);
+                return;
+            }
+            UpdateSurface(state);
+            if (!FollowSupport(self, state))
+            {
+                DetachPlayerFromSilk(self);
+                orig(self);
+                return;
+            }
+            RefreshContact(self, state);
+            TrySwitch(self, state);
+            bool vertical = VerticalAt(state.Target, state.Segment, state.Vertical);
+            // Hysteresis uses the load-bearing curve, not rapidly changing ripple slopes.
+            if (!state.Transfer.Active && vertical != state.Vertical && (self.animation == Player.AnimationIndex.ClimbOnBeam ||
+                self.animation == Player.AnimationIndex.StandOnBeam || self.animation == Player.AnimationIndex.HangFromBeam))
+            {
+                state.Vertical = vertical;
+                self.animation = vertical ? Player.AnimationIndex.ClimbOnBeam : Player.AnimationIndex.HangFromBeam;
+            }
+            var before = self.animation;
+            var raw = self.input[0];
+            try
+            {
+                MapRouteInput(self, state);
+                orig(self);
+            }
+            finally { self.input[0] = raw; }
+            if (OnNativeBeam(self))
+            {
+                Release(self, false, 0);
+                return;
+            }
+            if (!BeamAnimation(self.animation))
+            {
+                if (before == Player.AnimationIndex.HangUnderVerticalBeam && self.input[0].jmp && !self.input[1].jmp)
+                    ExciteJump(self, state);
+                Release(self, false, 10);
+            }
+        }
 
-            Vector2 upperPosition = self.bodyChunks[0].pos;
-            Vector2 lowerPosition = self.bodyChunks[1].pos;
-            orig(self);
-            if (!IsClimbing(self)) return;
-
-            // Vanilla beam animations align these coordinates to MiddleOfTile.
-            // On diagonal silk that target jumps at every tile boundary, before
-            // UpdateBodyMode runs our continuous silk alignment. Undo only the
-            // beam alignment axes; retain animation, velocity and along-beam motion.
-            // Terrain collision has already run and its positions are preserved.
-            if (climbing)
-            {
-                self.bodyChunks[0].pos.x = upperPosition.x;
-                self.bodyChunks[1].pos.x = lowerPosition.x;
-            }
-            else if (standing)
-            {
-                self.bodyChunks[1].pos.y = lowerPosition.y;
-            }
-            else
-            {
-                self.bodyChunks[0].pos.y = upperPosition.y;
-            }
+        private static bool OnNativeBeam(Player player)
+        {
+            var tile = player.room.GetTile(Contact(player));
+            return (player.animation == Player.AnimationIndex.ClimbOnBeam && tile.verticalBeam) ||
+                ((player.animation == Player.AnimationIndex.StandOnBeam || player.animation == Player.AnimationIndex.HangFromBeam) && tile.horizontalBeam);
         }
 
         private static void Player_UpdateBodyMode(On.Player.orig_UpdateBodyMode orig, Player self)
         {
-            // Always call orig() first — ensures other hooks work correctly
-            // and the game's internal body mode state machine stays consistent
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self))
+            {
+                states.Remove(self);
+                orig(self);
+                return;
+            }
+            if (!BeamAnimation(self.animation)) Release(self, false, 10);
+            var raw = self.input[0];
+            try
+            {
+                if (states.TryGetValue(self, out var attached) && Valid(self, attached)) MapRouteInput(self, attached);
+                orig(self);
+            }
+            finally { self.input[0] = raw; }
+            if (!states.TryGetValue(self, out var state) || !Valid(self, state)) return;
+            if (!BeamAnimation(self.animation) || self.bodyMode != Player.BodyModeIndex.ClimbingOnBeam)
+            {
+                Release(self, false, 10);
+                return;
+            }
+            RefreshContact(self, state);
+            Vector2 point = state.Target.GetPointOnSegment(state.Segment, state.T);
+            state.LastSupport = point;
+            state.Target.ApplyClimbForce(point, Vector2.down * self.gravity * self.TotalMass * 1.2f);
+            if (state.Target is SilkBridge bridge)
+            {
+                // Count travel on the control axis, not the normal ripple displacement.
+                int chunk = self.animation == Player.AnimationIndex.StandOnBeam ? 1 : 0;
+                Vector2 travel = self.bodyChunks[chunk].pos - self.bodyChunks[chunk].lastPos;
+                float distance = Mathf.Abs(state.Vertical ? travel.y : travel.x);
+                bool moving = distance > 0.1f && (state.RouteInputActive ||
+                    (state.Vertical ? self.input[0].y != 0 : self.input[0].x != 0));
+                state.StepDistance += moving ? distance : 0f;
+                if (moving && (!state.WasMoving || state.StepDistance >= 6f))
+                {
+                    state.StepDistance = state.WasMoving ? state.StepDistance % 6f : 0f;
+                    Vector2 press = state.Vertical ? Custom.PerpendicularVector(Tangent(state.Target, state.Segment)) : Vector2.down;
+                    bridge.ExciteMotion(state.Segment, state.T, press * self.TotalMass *
+                        Mathf.Clamp(1.4f + distance * 0.9f, 1.4f, 3.2f), gentle: true);
+                }
+                state.WasMoving = moving;
+            }
+        }
+
+        private static void Player_Jump(On.Player.orig_Jump orig, Player self)
+        {
+            if (RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self))
+            {
+                states.Remove(self);
+                orig(self);
+                return;
+            }
+            bool attached = states.TryGetValue(self, out var state) && Valid(self, state) && BeamAnimation(self.animation);
             orig(self);
+            if (!attached) return;
+            ExciteJump(self, state);
+            // Up+jump on a vertical pole keeps ClimbOnBeam and sets slideUpPole=17.
+            // All other departures keep the exact velocities/boost assigned by Jump().
+            if (!BeamAnimation(self.animation)) Release(self, false, 10);
+        }
 
-            if (climbStates.TryGetValue(self, out var state) && (state.Active || state.switching != null))
+        private static void ExciteJump(Player player, ClimbState state)
+        {
+            if (state.Target is SilkBridge bridge)
             {
-                UpdateSilkClimbPhysics(self, state);
+                Vector2 support = bridge.GetVelocityOnSegment(state.Segment, state.T);
+                bridge.ExciteMotion(state.Segment, state.T, (support - player.mainBodyChunk.vel) * player.TotalMass * 1.35f);
             }
         }
 
-        private static void UpdateSilkClimbPhysics(Player self, ClimbState state)
+        private static Vector2 Tangent(IClimbableSilk silk, int segment)
         {
-            if (state.switchCooldown > 0) state.switchCooldown--;
+            // Average a few material segments so small kinks cannot change posture.
+            int lo = Math.Max(0, segment - 1), hi = Math.Min(silk.SegmentCount - 1, segment + 1);
+            return silk is SilkBridge bridge
+                ? bridge.GetBasePoint(hi, 1f) - bridge.GetBasePoint(lo, 0f)
+                : silk.GetPointOnSegment(hi, 1f) - silk.GetPointOnSegment(lo, 0f);
+        }
 
-            if (state.switching != null)
+        private static bool VerticalAt(IClimbableSilk silk, int segment, bool wasVertical)
+        {
+            Vector2 tangent = Tangent(silk, segment);
+            return Mathf.Abs(tangent.y) > Mathf.Abs(tangent.x) * (wasVertical ? 0.65f : 0.85f);
+        }
+
+        private static Vector2 Contact(Player player) => player.bodyChunks[
+            player.animation == Player.AnimationIndex.StandOnBeam || player.animation == Player.AnimationIndex.BeamTip ? 1 : 0].pos;
+
+        private static void RefreshContact(Player player, ClimbState state)
+        {
+            if (TrySample(player, Contact(player), state.Vertical, out var sample))
             {
-                UpdateSwitching(self, state);
+                state.Segment = sample.Segment;
+                state.T = sample.T;
+            }
+        }
+
+        private static void TrySwitch(Player player, ClimbState state)
+        {
+            if (player.input[0].jmp || state.Transfer.Active) return;
+            Vector2 input = new Vector2(player.input[0].x, player.input[0].y);
+            if (input.sqrMagnitude < 0.01f) return;
+            // Leave vanilla's get-up transitions alone until a stable grip exists.
+            if (player.animation != Player.AnimationIndex.ClimbOnBeam &&
+                player.animation != Player.AnimationIndex.StandOnBeam &&
+                player.animation != Player.AnimationIndex.HangFromBeam &&
+                player.animation != Player.AnimationIndex.BeamTip &&
+                player.animation != Player.AnimationIndex.HangUnderVerticalBeam) return;
+            Vector2 contact = BasePoint(state.Target, state.Segment, state.T);
+            if ((contact - state.SwitchPoint).sqrMagnitude > 16f * 16f ||
+                Vector2.Dot(input.normalized, state.SwitchInput) < 0.5f)
+                state.PreviousTarget = null;
+            UpdateRoutingSurface(state.Target, ref state.RoutingPoints);
+            SilkBridge selected = null;
+            var best = new SilkClimbRouting.Route { Score = float.NegativeInfinity };
+            Vector2 movement = Vector2.zero;
+            bool selectedVertical = false;
+            int selectedSegment = 0;
+            float selectedT = 0f;
+            Player.AnimationIndex animation = player.animation;
+            foreach (var bridge in SilkBridgeManager.GetBridgesInRoom(player.room))
+            {
+                if (bridge == state.Target || !bridge.IsActive ||
+                    bridge.room != player.room || bridge.SegmentCount < 1) continue;
+                UpdateRoutingSurface(bridge, ref state.CandidatePoints);
+                bool found = SilkClimbRouting.TryRoute(state.RoutingPoints, state.CandidatePoints, contact, input, out var route);
+                // Explicit attachments stay connected even if a parent kink lies
+                // between the regular surface samples.
+                CheckAnchorRoute(bridge.startAnchor, state.Target, 0f, true, state, contact, input, ref found, ref route);
+                CheckAnchorRoute(bridge.endAnchor, state.Target, bridge.SegmentCount, true, state, contact, input, ref found, ref route);
+                if (state.Target is SilkBridge current)
+                {
+                    CheckAnchorRoute(current.startAnchor, bridge, 0f, false, state, contact, input, ref found, ref route);
+                    CheckAnchorRoute(current.endAnchor, bridge, current.SegmentCount, false, state, contact, input, ref found, ref route);
+                }
+                if (!found || !SilkClimbRouting.Better(route, best)) continue;
+                if (bridge == state.PreviousTarget && (route.Point - state.SwitchPoint).sqrMagnitude < 4f * 4f) continue;
+                MaterialCoordinate(bridge, route.Coordinate, out int segment, out float t);
+                bool vertical = VerticalAt(bridge, segment, state.Vertical);
+                var nextAnimation = vertical ? Player.AnimationIndex.ClimbOnBeam :
+                    player.animation == Player.AnimationIndex.StandOnBeam || player.animation == Player.AnimationIndex.BeamTip
+                        ? Player.AnimationIndex.StandOnBeam : Player.AnimationIndex.HangFromBeam;
+                int chunk = nextAnimation == Player.AnimationIndex.StandOnBeam ? 1 : 0;
+                Vector2 offset = vertical ? Vector2.right * (player.flipDirection * 5f) :
+                    nextAnimation == Player.AnimationIndex.StandOnBeam ? Vector2.up * 5f : Vector2.zero;
+                // Keep the occupied movement coordinate if the destination extends
+                // that far. In particular, feet-to-hands need not lower the whole
+                // body by its length when an upright branch already passes the head.
+                Vector2 grip = player.bodyChunks[chunk].pos - offset;
+                if (SilkBeamGeometry.TrySample(state.CandidatePoints, grip, vertical, out var nearby) &&
+                    nearby.AxisDistance < 0.01f && (nearby.Point - route.Point).sqrMagnitude <= 28f * 28f)
+                    MaterialCoordinate(bridge, nearby.Segment + nearby.T, out segment, out t);
+                Vector2 point = bridge.GetPointOnSegment(segment, t);
+                Vector2 shift = point + offset - player.bodyChunks[chunk].pos;
+                if (shift.sqrMagnitude > 32f * 32f || !CanMoveBody(player, shift)) continue;
+                selected = bridge;
+                selectedVertical = vertical;
+                selectedSegment = segment;
+                selectedT = t;
+                animation = nextAnimation;
+                movement = shift;
+                best = route;
+            }
+            if (selected == null) return;
+            state.PreviousTarget = state.Target;
+            state.SwitchPoint = best.Point;
+            state.SwitchInput = input.normalized;
+            state.RouteInputActive = true;
+            state.Target = selected;
+            state.Segment = selectedSegment;
+            state.T = selectedT;
+            state.Vertical = selectedVertical;
+            state.RouteSign = Vector2.Dot(Tangent(selected, state.Segment), best.Outgoing) >= 0f ? 1 : -1;
+            state.StepDistance = 0f;
+            state.WasMoving = false;
+            state.LastSupport = selected.GetPointOnSegment(state.Segment, state.T);
+            // Start the new queried support at the existing grip. Do not teleport
+            // either chunk or rewrite lastPos: rendering must interpolate the move.
+            state.Transfer.Begin(movement);
+            UpdateSurface(state);
+            player.animation = animation;
+            player.bodyMode = Player.BodyModeIndex.ClimbingOnBeam;
+            player.room.PlaySound(SoundID.Slugcat_Grab_Beam, player.mainBodyChunk);
+        }
+
+        private static void CheckAnchorRoute(BridgeAnchor anchor, IClimbableSilk parent, float endpoint,
+            bool candidateIsChild, ClimbState state, Vector2 contact, Vector2 input,
+            ref bool found, ref SilkClimbRouting.Route best)
+        {
+            if (anchor.type != BridgeAnchor.AnchorType.BridgeSegment || anchor.attachedBridge != parent) return;
+            float parentCoordinate = (anchor.segmentIndex + anchor.segmentT) * SurfaceSubdivisions;
+            endpoint *= SurfaceSubdivisions;
+            if (!SilkClimbRouting.TryJunction(state.RoutingPoints, candidateIsChild ? parentCoordinate : endpoint,
+                state.CandidatePoints, candidateIsChild ? endpoint : parentCoordinate, contact, input, out var route)) return;
+            if (!found || SilkClimbRouting.Better(route, best)) best = route;
+            found = true;
+        }
+
+        private static void MapRouteInput(Player player, ClimbState state)
+        {
+            if (!state.RouteInputActive) return;
+            Vector2 input = new Vector2(player.input[0].x, player.input[0].y);
+            if (player.input[0].jmp || (input.normalized - state.SwitchInput).sqrMagnitude > 0.001f)
+            {
+                state.RouteInputActive = false;
                 return;
             }
-
-            var silk = state.ClimbTarget;
-            if (silk == null || !silk.IsActive)
+            // An up/down-selected sloping branch may still use vanilla's horizontal
+            // beam posture. Feed its travel axis, otherwise down would drop the grip
+            // immediately and up would pull up instead of following that branch.
+            Vector2 travel = Tangent(state.Target, state.Segment).normalized * state.RouteSign;
+            if (Vector2.Dot(travel, input.normalized) < 0.15f)
             {
-                DetachPlayerFromSilk(self);
+                state.RouteInputActive = false;
                 return;
             }
-
-            Vector2 tangent = ComputeSegmentTangent(silk, state.SegmentIndex, state.T);
-            float angle = Vector2.Angle(tangent, Vector2.up);
-
-            ClimbMode newMode = (angle < 55f || angle > 125f) ? ClimbMode.VerticalClimb : ClimbMode.HorizontalClimb;
-            if (newMode != state.CurrentClimbMode)
-            {
-                state.CurrentClimbMode = newMode;
-                self.animation = (newMode == ClimbMode.VerticalClimb) ? Player.AnimationIndex.ClimbOnBeam : Player.AnimationIndex.StandOnBeam;
-                state.IsHanging = false;
-            }
-
-            self.bodyMode = Player.BodyModeIndex.ClimbingOnBeam;
-
-            if (state.CurrentClimbMode == ClimbMode.VerticalClimb)
-            {
-                VerticalClimbUpdate(self, state, tangent);
-            }
-            else
-            {
-                HorizontalClimbUpdate(self, state, tangent);
-            }
-
-            Vector2 vector = self.bodyChunks[0].pos - self.bodyChunks[1].pos;
-            float magnitude = vector.magnitude;
-            float num = self.bodyChunkConnections[0].distance - magnitude;
-            if (magnitude > 0.001f)
-            {
-                vector.Normalize();
-                self.bodyChunks[0].pos += vector * num * 0.7f;
-                self.bodyChunks[0].vel += vector * num * 0.7f;
-                self.bodyChunks[1].pos -= vector * num * 0.3f;
-                self.bodyChunks[1].vel -= vector * num * 0.3f;
-            }
-
-            Vector2 targetPointOnSilk = silk.GetPointOnSegment(state.SegmentIndex, state.T);
-            state.smoothedAttachPoint = Vector2.Lerp(state.smoothedAttachPoint, targetPointOnSilk, 0.4f);
-
-            if (state.Active && state.switching == null)
-            {
-                // Weight persists even when perfectly aligned or standing still.
-                Vector2 force = Vector2.down * self.gravity * self.TotalMass * 1.2f;
-                silk.ApplyClimbForce(targetPointOnSilk, force);
-            }
+            player.input[0].x = state.Vertical ? 0 : travel.x >= 0f ? 1 : -1;
+            player.input[0].y = state.Vertical ? (travel.y >= 0f ? 1 : -1) : 0;
         }
 
-        private static void UpdateSwitching(Player player, ClimbState state)
+        private static Vector2 BasePoint(IClimbableSilk silk, int segment, float t) => silk is SilkBridge bridge
+            ? bridge.GetBasePoint(segment, t) : silk.GetPointOnSegment(segment, t);
+
+        private static void UpdateRoutingSurface(IClimbableSilk silk, ref Vector2[] points)
         {
-            if (state.switching == null || state.switching.toSilk == null || !state.switching.toSilk.IsActive)
-            {
-                DetachPlayerFromSilk(player);
-                return;
-            }
-
-            state.switching.counter++;
-            float smoothProgress = Mathf.SmoothStep(0f, 1f, state.switching.Progress);
-
-            Vector2 targetPos = state.switching.toSilk.GetPointOnSegment(state.switching.toSeg, state.switching.toT);
-            state.switching.toSilk.ApplyClimbForce(targetPos, Vector2.down * player.gravity * player.TotalMass * 1.2f);
-            Vector2 newPos = Vector2.Lerp(state.switching.fromPos, targetPos, smoothProgress);
-
-            player.mainBodyChunk.vel *= 0.85f;
-            AlignPlayerToPoint(player, newPos, state);
-
-            if (state.switching.counter >= state.switching.duration)
-            {
-                var finalSilk = state.switching.toSilk;
-                var finalSeg = state.switching.toSeg;
-                var finalT = state.switching.toT;
-
-                state.switching = null;
-                state.ClimbTarget = finalSilk;
-                state.SegmentIndex = finalSeg;
-                state.T = finalT;
-                state.smoothedAttachPoint = targetPos;
-
-                player.bodyMode = Player.BodyModeIndex.ClimbingOnBeam;
-                player.animation = Player.AnimationIndex.ClimbOnBeam;
-                player.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, player.mainBodyChunk, false, 1f, 1.1f);
-            }
+            int samples = silk.SegmentCount * SurfaceSubdivisions;
+            if (points == null || points.Length != samples + 1) points = new Vector2[samples + 1];
+            for (int i = 0; i < samples; i++)
+                points[i] = BasePoint(silk, i / SurfaceSubdivisions, (i % SurfaceSubdivisions) / (float)SurfaceSubdivisions);
+            points[samples] = BasePoint(silk, silk.SegmentCount - 1, 1f);
         }
 
-        private const float SilkClimbGrabRange = 24f;
-
-        private static bool TrySwitchBridge(Player self, ClimbState state, int inputX, int inputY)
+        private static void MaterialCoordinate(IClimbableSilk silk, float coordinate, out int segment, out float t)
         {
-            if (state.switchCooldown > 0 || IsNearVanillaPole(self)) return false;
-
-            Vector2 checkDir = new Vector2(inputX, inputY);
-            Vector2 checkPos = self.mainBodyChunk.pos + checkDir * 10f;
-            SilkBridge targetBridge = SilkBridgeManager.GetClosestBridge(self.room, checkPos, SilkClimbGrabRange, b => b != state.ClimbTarget);
-
-            if (targetBridge != null)
-            {
-                int segIndex;
-                float t;
-                Vector2 closestPoint = targetBridge.GetClosestPoint(checkPos, out segIndex, out t);
-
-                if (Vector2.Distance(checkPos, closestPoint) < SilkClimbGrabRange)
-                {
-                    Vector2 targetTangent = ComputeSegmentTangent(targetBridge, segIndex, t);
-                    float angle = Vector2.Angle(targetTangent, Vector2.up);
-                    bool isTargetHorizontal = (angle >= 55f && angle <= 125f);
-
-                    bool shouldSwitch = (state.CurrentClimbMode == ClimbMode.VerticalClimb && isTargetHorizontal && inputX != 0) ||
-                                        (state.CurrentClimbMode == ClimbMode.HorizontalClimb && !isTargetHorizontal && inputY != 0);
-
-                    if (shouldSwitch)
-                    {
-                        state.switchCooldown = 15;
-                        state.switching = new SwitchingState
-                        {
-                            toSilk = targetBridge,
-                            toSeg = segIndex,
-                            toT = t,
-                            fromPos = self.mainBodyChunk.pos,
-                            duration = 7
-                        };
-                        self.room.PlaySound(SoundID.Player_Grab_Pole_Mimic, self.mainBodyChunk.pos, 0.6f, 1.2f);
-                        return true;
-                    }
-                }
-            }
-            return false;
+            coordinate /= SurfaceSubdivisions;
+            segment = Math.Min((int)coordinate, silk.SegmentCount - 1);
+            t = coordinate - segment;
         }
 
-        private static void VerticalClimbUpdate(Player self, ClimbState state, Vector2 tangent)
+        private static bool CanMoveBody(Player player, Vector2 movement)
         {
-            var silk = state.ClimbTarget;
-            self.animation = Player.AnimationIndex.ClimbOnBeam;
-
-            self.bodyChunks[0].vel *= 0.75f;
-            self.bodyChunks[1].vel *= 0.75f;
-
-            if (self.input[0].x != 0 && self.input[1].x == 0)
-            {
-                if (TrySwitchBridge(self, state, self.input[0].x, 0)) return;
-            }
-
-            if (self.input[0].jmp && !self.input[1].jmp)
-            {
-                Vector2 jumpDir = (tangent * self.input[0].x * 0.8f + Vector2.up * 0.7f).normalized;
-                self.jumpBoost = 7f;
-                self.bodyChunks[0].vel = jumpDir * 10f;
-                self.bodyChunks[1].vel = jumpDir * 8f;
-                self.canJump = 0;
-                DetachPlayerFromSilk(self);
-                return;
-            }
-
-            if (self.input[0].y < 0 && self.input[0].jmp && !self.input[1].jmp)
-            {
-                DetachPlayerFromSilk(self);
-                return;
-            }
-
-            int dy = self.input[0].y;
-            if (dy != 0)
-            {
-                float climbSpeed = self.slugcatStats.poleClimbSpeedFac * 1.8f;
-                Vector2 segStart = silk.GetPointOnSegment(state.SegmentIndex, 0f);
-                Vector2 segEnd = silk.GetPointOnSegment(state.SegmentIndex, 1f);
-                int upSign = (segEnd.y - segStart.y) >= 0 ? 1 : -1;
-                float segmentLength = Vector2.Distance(segStart, segEnd);
-                float deltaT = (segmentLength > 0.1f) ? (climbSpeed * dy * upSign) / segmentLength : 0f;
-                state.T += deltaT;
-                UpdateSegment(state, silk);
-                Vector2 move = (segEnd - segStart).normalized * climbSpeed * dy * upSign;
-                self.bodyChunks[0].pos += move;
-                self.bodyChunks[1].pos += move;
-            }
-            AlignPlayerToPoint(self, state.smoothedAttachPoint, state);
+            foreach (var chunk in player.bodyChunks)
+                if (player.room.GetTile(chunk.pos + movement).Solid ||
+                    (movement.sqrMagnitude > 0.01f && !player.room.VisualContact(chunk.pos, chunk.pos + movement))) return false;
+            return true;
         }
 
-        private static void HorizontalClimbUpdate(Player self, ClimbState state, Vector2 tangent)
+        internal static bool TrySample(Player player, Vector2 query, bool vertical, out SilkBeamGeometry.Sample sample)
         {
-            var silk = state.ClimbTarget;
-
-            if (self.input[0].y != 0 && self.input[1].y == 0)
-            {
-                if (state.IsHanging && self.input[0].y < 0)
-                {
-                    DetachPlayerFromSilk(self);
-                    return;
-                }
-                if (TrySwitchBridge(self, state, 0, self.input[0].y)) return;
-                state.IsHanging = self.input[0].y < 0;
-            }
-            self.animation = state.IsHanging ? Player.AnimationIndex.HangFromBeam : Player.AnimationIndex.StandOnBeam;
-
-            if (self.input[0].jmp && !self.input[1].jmp)
-            {
-                Vector2 jumpDir = (Vector2.up * (state.IsHanging ? -0.5f : 1.1f) + tangent * self.input[0].x).normalized;
-                self.jumpBoost = 6f;
-                self.bodyChunks[0].vel = jumpDir * 9.5f;
-                self.bodyChunks[1].vel = jumpDir * 8f;
-                self.canJump = 0;
-                DetachPlayerFromSilk(self);
-                return;
-            }
-
-            int dx = self.input[0].x;
-            if (dx != 0)
-            {
-                float moveDirection = (Vector2.Dot(tangent, Vector2.right) < 0) ? -dx : dx;
-                float climbSpeed = self.slugcatStats.poleClimbSpeedFac * 1.6f * moveDirection;
-                Vector2 segStart = silk.GetPointOnSegment(state.SegmentIndex, 0f);
-                Vector2 segEnd = silk.GetPointOnSegment(state.SegmentIndex, 1f);
-                float segmentLength = Vector2.Distance(segStart, segEnd);
-                float deltaT = (segmentLength > 0.1f) ? climbSpeed / segmentLength : 0f;
-                state.T += deltaT;
-                UpdateSegment(state, silk);
-            }
-
-            self.bodyChunks[0].vel.y -= self.gravity * 0.5f;
-            self.bodyChunks[1].vel.y -= self.gravity * 0.5f;
-            self.bodyChunks[0].vel.x *= 0.85f;
-            self.bodyChunks[1].vel.x *= 0.85f;
-
-            AlignPlayerToPoint(self, state.smoothedAttachPoint, state);
+            sample = default;
+            if (!states.TryGetValue(player, out var state) || !Valid(player, state)) return false;
+            if (state.Points == null || !SilkBeamGeometry.TrySample(state.Points, query, vertical, state.Transfer.Offset, out sample)) return false;
+            float coordinate = (sample.Segment + sample.T) / SurfaceSubdivisions;
+            sample.Segment = Math.Min((int)coordinate, state.Target.SegmentCount - 1);
+            sample.T = coordinate - sample.Segment;
+            return true;
         }
 
-        private static void AlignPlayerToPoint(Player player, Vector2 point, ClimbState state)
+        private static void UpdateSurface(ClimbState state)
         {
-            float bodyDist = player.bodyChunkConnections[0].distance;
-            if (state.CurrentClimbMode == ClimbMode.HorizontalClimb)
-            {
-                if (state.IsHanging)
-                {
-                    player.bodyChunks[0].pos = Vector2.Lerp(player.bodyChunks[0].pos, point + Vector2.down * 2f, 0.4f);
-                    player.bodyChunks[1].pos = Vector2.Lerp(player.bodyChunks[1].pos, point + Vector2.down * (bodyDist + 2f), 0.3f);
-                }
-                else
-                {
-                    player.bodyChunks[1].pos = Vector2.Lerp(player.bodyChunks[1].pos, point, 0.7f);
-                    player.bodyChunks[0].vel.y += player.gravity * 0.8f;
-                }
-            }
-            else
-            {
-                float xBias = 0.5f;
-                player.mainBodyChunk.pos.x = Mathf.Lerp(player.mainBodyChunk.pos.x, point.x, xBias);
-                player.bodyChunks[1].pos.x = Mathf.Lerp(player.bodyChunks[1].pos.x, point.x, xBias * 0.8f);
-                player.bodyChunks[0].pos.y = Mathf.Lerp(player.bodyChunks[0].pos.y, point.y, 0.8f);
-                player.bodyChunks[1].pos.y = Mathf.Lerp(player.bodyChunks[1].pos.y, point.y - bodyDist, 0.7f);
-            }
+            int count = state.Target.SegmentCount;
+            int samples = count * SurfaceSubdivisions;
+            if (state.Points == null || state.Points.Length != samples + 1) state.Points = new Vector2[samples + 1];
+            for (int i = 0; i < samples; i++)
+                state.Points[i] = state.Target.GetPointOnSegment(i / SurfaceSubdivisions, (i % SurfaceSubdivisions) / (float)SurfaceSubdivisions);
+            state.Points[samples] = state.Target.GetPointOnSegment(count - 1, 1f);
         }
 
-        private static void UpdateSegment(ClimbState state, IClimbableSilk silk)
+        private static bool FollowSupport(Player player, ClimbState state)
         {
-            if (state.T < 0f)
+            Vector2 point = state.Target.GetPointOnSegment(state.Segment, state.T);
+            Vector2 movement = point - state.LastSupport;
+            // Carry the body with sag/ripples before vanilla checks its grip. A
+            // moving support must not appear to disappear underneath the feet.
+            // Along-axis movement and jump velocities still belong to vanilla.
+            if (state.Vertical) movement.y = 0f;
+            else movement.x = 0f;
+            var transfer = state.Transfer;
+            // A pole jump retains its grip; do not add handoff correction while
+            // jumping. Departures clear the transfer without applying its remainder.
+            if (!player.input[0].jmp) transfer.Advance();
+            movement += transfer.Offset - state.Transfer.Offset;
+            if (movement.sqrMagnitude > 35f * 35f) return false;
+            for (int i = 0; i < player.bodyChunks.Length; i++)
             {
-                if (state.SegmentIndex > 0) { state.SegmentIndex--; state.T += 1f; }
-                else { state.T = 0f; }
+                Vector2 from = player.bodyChunks[i].pos;
+                if (player.room.GetTile(from + movement).Solid ||
+                    (movement.sqrMagnitude > 0.01f && !player.room.VisualContact(from, from + movement))) return false;
             }
-            else if (state.T > 1f)
-            {
-                if (state.SegmentIndex < silk.SegmentCount - 1) { state.SegmentIndex++; state.T -= 1f; }
-                else { state.T = 1f; }
-            }
+            for (int i = 0; i < player.bodyChunks.Length; i++) player.bodyChunks[i].pos += movement;
+            state.Transfer = transfer;
+            state.LastSupport = point;
+            return true;
         }
 
-        private static Vector2 ComputeSegmentTangent(IClimbableSilk silk, int segIndex, float t)
+        internal static bool TryGetSurface(Player player, out bool vertical)
         {
-            float dt = 0.05f;
-            Vector2 p0, p1;
-            if (t < dt && segIndex > 0)
-            {
-                p0 = silk.GetPointOnSegment(segIndex - 1, 1f - (dt - t));
-                p1 = silk.GetPointOnSegment(segIndex, t + dt);
-            }
-            else if (t > 1f - dt && segIndex < silk.SegmentCount - 1)
-            {
-                p0 = silk.GetPointOnSegment(segIndex, t - dt);
-                p1 = silk.GetPointOnSegment(segIndex + 1, dt - (1f - t));
-            }
-            else
-            {
-                p0 = silk.GetPointOnSegment(segIndex, Mathf.Clamp01(t - dt));
-                p1 = silk.GetPointOnSegment(segIndex, Mathf.Clamp01(t + dt));
-            }
-            Vector2 tangent = p1 - p0;
-            if (tangent.sqrMagnitude < 1e-4f)
-            {
-                if (silk.SegmentCount > 1)
-                {
-                    int nextSeg = (segIndex < silk.SegmentCount - 1) ? segIndex + 1 : segIndex - 1;
-                    return (silk.GetPointOnSegment(nextSeg, 0.5f) - silk.GetPointOnSegment(segIndex, 0.5f)).normalized;
-                }
-                return Vector2.up;
-            }
-            return tangent.normalized;
+            vertical = false;
+            if (!IsClimbing(player)) return false;
+            vertical = states.GetOrCreateValue(player).Vertical;
+            return true;
         }
 
-        private static bool IsNearVanillaPole(Player player, float range = 22f)
+        // IntVector2 beam queries express offsets from the occupied tile. Anchor
+        // that grid to the contact chunk, so a strand at y=19 behaves like y=10.
+        internal static Vector2 TileQuery(Player player, IntVector2 tile)
         {
-            if (player?.room == null) return false;
-            IntVector2 tile = player.room.GetTilePosition(player.mainBodyChunk.pos);
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                for (int dy = -1; dy <= 1; dy++)
-                {
-                    var t = player.room.GetTile(tile.x + dx, tile.y + dy);
-                    if (t.verticalBeam || t.horizontalBeam)
-                    {
-                        Vector2 polePos = player.room.MiddleOfTile(tile.x + dx, tile.y + dy);
-                        if (Vector2.Distance(player.mainBodyChunk.pos, polePos) < range) return true;
-                    }
-                }
-            }
-            return false;
+            Vector2 contact = Contact(player);
+            IntVector2 origin = player.room.GetTilePosition(contact);
+            return contact + new Vector2((tile.x - origin.x) * 20f, (tile.y - origin.y) * 20f);
         }
     }
 }

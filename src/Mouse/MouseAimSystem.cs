@@ -1,5 +1,5 @@
-﻿using RWCustom;
-using System.Reflection;
+using RWCustom;
+using System.Runtime.CompilerServices;
 using Tinker.Silk.Bridge;
 using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
@@ -8,180 +8,149 @@ namespace tinker.Mouse
 {
     public static class MouseAimSystem
     {
-        private static FieldInfo weaponThrowDirField;
-        private static bool reflectionInitialized = false;
-        private static RoomCamera currentCamera;
-        private static bool mouseAimEnabled = false;
-        private static Player currentPlayer;
-        private static int currentPlayerNumber = 0;
-
-        public static RoomCamera GetCurrentCamera() => currentCamera;
-
-        public static bool IsGamepadActive(Player player)
+        private sealed class CameraView
         {
-            try { return player != null && player.input[0].gamePad; }
-            catch { return false; }
+            public Room Room;
+            public Vector2 Position;
         }
 
-        public static Vector2 GetAimDirection(Player player)
+        private static ConditionalWeakTable<RoomCamera, CameraView> cameraViews = new();
+        private static bool initialized;
+
+        public static RoomCamera GetCurrentCamera(Player player)
         {
-            var cam = GetCurrentCamera();
-            Vector2 aimVector;
-
-            if (cam != null)
+            if (player?.room?.game?.cameras == null) return null;
+            RoomCamera roomCamera = null;
+            foreach (var camera in player.room.game.cameras)
             {
-                // Check for gamepad aim first
-                bool gamepadActive = IsGamepadActive(player);
-                if (gamepadActive)
-                {
-                    var gpState = GamepadBridgeState.GetOrCreate(player);
-                    if (gpState.aiming)
-                    {
-                        aimVector = gpState.aimWorldPos - player.mainBodyChunk.pos;
-                    }
-                    else
-                    {
-                        aimVector = Vector2.right * player.flipDirection;
-                    }
-                }
-                else
-                {
-                    Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-                    aimVector = mouseWorldPos - player.mainBodyChunk.pos;
-                }
+                if (camera?.room != player.room) continue;
+                if (camera.followAbstractCreature == player.abstractCreature) return camera;
+                if (roomCamera == null) roomCamera = camera;
             }
-            else
+            return roomCamera;
+        }
+
+        internal static Vector2 CameraPosition(RoomCamera camera) =>
+            cameraViews.TryGetValue(camera, out var view) && view.Room == camera.room ? view.Position : camera.pos;
+
+        // Futile handles window scaling; the world container handles camera zoom
+        // and viewport transforms. Use the same origin that drew the player.
+        public static bool TryGetMouseWorldPosition(Player player, out Vector2 position)
+        {
+            var camera = GetCurrentCamera(player);
+            position = Vector2.zero;
+            if (camera == null) return false;
+            position = camera.ReturnFContainer("Midground").ScreenToLocal(Futile.mousePosition) + CameraPosition(camera);
+            return true;
+        }
+
+        internal static Vector2 WorldToHud(RoomCamera camera, FContainer hud, Vector2 position) =>
+            hud.OtherToLocal(camera.ReturnFContainer("Midground"), position - CameraPosition(camera));
+
+        public static bool IsGamepadActive(Player player) => player != null &&
+            (player.input[0].gamePad || GamepadBridgeState.GetOrCreate(player).gamepadConnected);
+
+        internal static bool IsLocalPlayer(Player player)
+        {
+            if (player?.room == null || player.slatedForDeletetion || player.isSlugpup ||
+                player.slugcatStats.name != Plugin.SlugName) return false;
+            if (Silk.RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
+                return !Silk.RainMeadow.RainMeadowBridge.IsOnlineAndRemote(player);
+            string controller = player.controller?.GetType().Name;
+            return controller == null || controller == "KeyboardController" || controller == "JoystickController";
+        }
+
+        public static bool IsMouseAimEnabled(Player player) => Options_Hook.MouseAimEnabled && IsLocalPlayer(player);
+
+        public static Vector2 GetAimDirection(Player player) => GetAimDirection(player, player.mainBodyChunk.pos);
+
+        public static Vector2 GetAimDirection(Player player, Vector2 origin)
+        {
+            Vector2 direction;
+            if (IsGamepadActive(player))
             {
-                aimVector = player.bodyChunks[0].vel.magnitude > 0.5f
-                    ? player.bodyChunks[0].vel
-                    : new Vector2(player.input[0].x, player.input[0].y);
+                var state = GamepadBridgeState.GetOrCreate(player);
+                direction = state.aiming ? state.aimWorldPos - origin : Vector2.right * player.flipDirection;
             }
-
-            if (aimVector.magnitude < 0.1f)
-                aimVector = Vector2.right * player.flipDirection;
-
-            return aimVector.normalized;
+            else if (TryGetMouseWorldPosition(player, out var target)) direction = target - origin;
+            else direction = new Vector2(player.input[0].x, player.input[0].y);
+            return direction.sqrMagnitude < 0.01f ? Vector2.right * (player.flipDirection < 0 ? -1f : 1f) : direction.normalized;
         }
 
         public static void Initialize()
         {
-            InitializeReflection();
+            if (initialized) return;
             On.Weapon.Thrown += Weapon_Thrown;
             On.RWInput.PlayerInputLogic_int_int += PlayerInputLogic;
-            On.RoomCamera.ctor += RoomCamera_ctor;
+            On.PlayerGraphics.DrawSprites += PlayerGraphics_DrawSprites;
+            initialized = true;
         }
 
-        private static void InitializeReflection()
+        private static void PlayerGraphics_DrawSprites(On.PlayerGraphics.orig_DrawSprites orig, PlayerGraphics self,
+            RoomCamera.SpriteLeaser leaser, RoomCamera camera, float timeStacker, Vector2 camPos)
         {
-            if (reflectionInitialized) return;
-            weaponThrowDirField = typeof(Weapon).GetField("throwDir", BindingFlags.NonPublic | BindingFlags.Instance);
-            reflectionInitialized = true;
+            var view = cameraViews.GetValue(camera, _ => new CameraView());
+            view.Room = camera.room;
+            view.Position = camPos;
+            orig(self, leaser, camera, timeStacker, camPos);
         }
 
-        private static void RoomCamera_ctor(On.RoomCamera.orig_ctor orig, RoomCamera self, RainWorldGame game, int cameraNumber)
+        private static void Weapon_Thrown(On.Weapon.orig_Thrown orig, Weapon weapon, Creature thrownBy,
+            Vector2 thrownPos, Vector2? firstFrameTraceFromPos, IntVector2 throwDir, float frc, bool eu)
         {
-            orig(self, game, cameraNumber);
-            currentCamera = self;
-        }
+            if (thrownBy is not Player player || !IsMouseAimEnabled(player) ||
+                (IsGamepadActive(player) && !GamepadBridgeState.GetOrCreate(player).aiming) ||
+                (!IsGamepadActive(player) && GetCurrentCamera(player) == null))
+            {
+                orig(weapon, thrownBy, thrownPos, firstFrameTraceFromPos, throwDir, frc, eu);
+                return;
+            }
 
-        public static void SetMouseAimEnabled(bool enabled, Player player)
-        {
-            mouseAimEnabled = enabled;
-            currentPlayer = player;
-            if (player?.playerState != null)
-                currentPlayerNumber = player.playerState.playerNumber;
-        }
-
-        public static bool IsMouseAimEnabled() => mouseAimEnabled && currentPlayer != null;
-
-        private static void Weapon_Thrown(On.Weapon.orig_Thrown orig, Weapon weapon, Creature thrownBy, Vector2 thrownPos, Vector2? firstFrameTraceFromPos, IntVector2 throwDir, float frc, bool eu)
-        {
+            Vector2 aim = GetAimDirection(player, thrownPos);
+            // Vanilla still needs a cardinal direction for collision bookkeeping.
+            // Pass it through Thrown instead of reflecting into a protected field.
+            throwDir = Mathf.Abs(aim.x) >= Mathf.Abs(aim.y)
+                ? new IntVector2(aim.x < 0f ? -1 : 1, 0)
+                : new IntVector2(0, aim.y < 0f ? -1 : 1);
             orig(weapon, thrownBy, thrownPos, firstFrameTraceFromPos, throwDir, frc, eu);
-
-            if (mouseAimEnabled && thrownBy is Player player && player == currentPlayer)
-            {
-                bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
-                if (isTinker && currentCamera != null)
-                {
-                    Vector2 aimDir;
-
-                    // Gamepad branch: aim at gamepad cursor position
-                    if (IsGamepadActive(player))
-                    {
-                        var gpState = GamepadBridgeState.GetOrCreate(player);
-                        if (gpState.aiming)
-                            aimDir = (gpState.aimWorldPos - thrownPos).normalized;
-                        else
-                            aimDir = new Vector2(player.flipDirection, 0f).normalized;
-                    }
-                    else
-                    {
-                        // Mouse branch: aim at mouse cursor position
-                        Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + currentCamera.pos.x, Futile.mousePosition.y + currentCamera.pos.y);
-                        aimDir = (mouseWorldPos - thrownPos).normalized;
-                    }
-
-                    float originalSpeed = weapon.firstChunk.vel.magnitude;
-
-                    foreach (BodyChunk bodyChunk in weapon.bodyChunks)
-                    {
-                        bodyChunk.vel = aimDir * originalSpeed;
-                    }
-                    weapon.setRotation = aimDir;
-                }
-            }
+            float speed = weapon.firstChunk.vel.magnitude;
+            foreach (var chunk in weapon.bodyChunks) chunk.vel = aim * speed;
+            weapon.setRotation = aim;
+            // The vanilla three-tick correction otherwise turns aimed throws
+            // back towards the player's movement/facing direction.
+            weapon.changeDirCounter = 0;
         }
 
-        private static Player.InputPackage PlayerInputLogic(On.RWInput.orig_PlayerInputLogic_int_int orig, int categoryID, int playerNumber)
+        private static Player.InputPackage PlayerInputLogic(On.RWInput.orig_PlayerInputLogic_int_int orig,
+            int categoryID, int playerNumber)
         {
-            Player.InputPackage inputPackage = orig(categoryID, playerNumber);
-
-            if (!mouseAimEnabled || playerNumber != currentPlayerNumber || currentPlayer == null)
+            var input = orig(categoryID, playerNumber);
+            if (categoryID != 0 || input.gamePad ||
+                Custom.rainWorld?.processManager?.currentMainLoop is not RainWorldGame game || game.paused) return input;
+            foreach (var creature in game.Players)
             {
-                return inputPackage;
+                if (creature.realizedCreature is not Player player || player.playerState.playerNumber != playerNumber ||
+                    !IsMouseAimEnabled(player) || IsGamepadActive(player)) continue;
+                if (Input.GetKey(KeyCode.E)) input.pckp = true;
+                var bridge = SilkBridgeManager.GetBridgeModeState(player);
+                // Reserve the click immediately while the silk button is held,
+                // including the tick before build mode has been activated.
+                bool building = bridge?.active == true || bridge?.animating == true ||
+                    (Input.GetKey(Options_Hook.SilkShootKey) && Silk.tinkerSilkData.Get(player).Attached);
+                if (Input.GetMouseButton(0)) input.thrw = !building;
+                break;
             }
-
-            // ── Gamepad detected: skip keyboard/mouse input injection ──
-            // Trigger input is sampled separately by GamepadInputReader.
-            if (IsGamepadActive(currentPlayer))
-                return inputPackage;
-
-            bool isTinker = currentPlayer.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !currentPlayer.isSlugpup;
-            if (!isTinker) return inputPackage;
-
-            bool inGame = RWCustom.Custom.rainWorld.processManager.currentMainLoop is RainWorldGame;
-
-            bool isInBuildMode = false;
-            var bridgeState = SilkBridgeManager.GetBridgeModeState(currentPlayer);
-            if (bridgeState != null)
-            {
-                isInBuildMode = bridgeState.active;
-            }
-
-            if (inGame)
-            {
-                if (Input.GetKey(KeyCode.E))
-                    inputPackage.pckp = true;
-
-                if (Input.GetMouseButton(0) && !isInBuildMode)
-                {
-                    inputPackage.thrw = true;
-                }
-            }
-
-            return inputPackage;
+            return input;
         }
 
         public static void Cleanup()
         {
+            if (!initialized) return;
             On.Weapon.Thrown -= Weapon_Thrown;
             On.RWInput.PlayerInputLogic_int_int -= PlayerInputLogic;
-            On.RoomCamera.ctor -= RoomCamera_ctor;
-            reflectionInitialized = false;
-            mouseAimEnabled = false;
-            currentPlayer = null;
-            currentPlayerNumber = 0;
-            currentCamera = null;
+            On.PlayerGraphics.DrawSprites -= PlayerGraphics_DrawSprites;
+            cameraViews = new();
+            initialized = false;
         }
     }
 }

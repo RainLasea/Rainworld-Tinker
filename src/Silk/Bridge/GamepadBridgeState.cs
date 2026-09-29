@@ -26,6 +26,7 @@ namespace Tinker.Silk.Bridge
         public bool rtHeld;
         public float rtHoldSeconds;
         public int playerNumber;
+        private Player owner;
 
         // ── Pool / lifecycle ───────────────────────────────────
         private static readonly ConditionalWeakTable<Player, GamepadBridgeState> _states =
@@ -37,7 +38,7 @@ namespace Tinker.Silk.Bridge
             if (_states.TryGetValue(player, out var state))
                 return state;
 
-            state = new GamepadBridgeState();
+            state = new GamepadBridgeState { owner = player };
             _states.Add(player, state);
             return state;
         }
@@ -70,7 +71,7 @@ namespace Tinker.Silk.Bridge
             selectingBridge = false;
             playerNumber = player.playerState?.playerNumber ?? 0;
 
-            var cam = MouseAimSystem.GetCurrentCamera();
+            var cam = MouseAimSystem.GetCurrentCamera(owner);
             if (cam != null)
             {
                 if (!savedCursorScreenPositions.TryGetValue(playerNumber, out Vector2 screenPos))
@@ -104,7 +105,7 @@ namespace Tinker.Silk.Bridge
         /// <summary>Clamp cursor world pos to current camera bounds.</summary>
         public void ClampToCamera()
         {
-            var cam = MouseAimSystem.GetCurrentCamera();
+            var cam = MouseAimSystem.GetCurrentCamera(owner);
             if (cam == null) return;
             aimWorldPos.x = Mathf.Clamp(aimWorldPos.x, cam.pos.x, cam.pos.x + cam.sSize.x);
             aimWorldPos.y = Mathf.Clamp(aimWorldPos.y, cam.pos.y, cam.pos.y + cam.sSize.y);
@@ -112,7 +113,7 @@ namespace Tinker.Silk.Bridge
 
         private void SaveCursorScreenPosition()
         {
-            var cam = MouseAimSystem.GetCurrentCamera();
+            var cam = MouseAimSystem.GetCurrentCamera(owner);
             if (cam != null)
                 savedCursorScreenPositions[playerNumber] = aimWorldPos - cam.pos;
         }

@@ -1,103 +1,80 @@
 #if RAINMEADOW
 using RainMeadow;
 using UnityEngine;
+using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Silk.RainMeadow
 {
-    /// <summary>
-    /// Custom EntityData for syncing Tinker's silk state over Rain Meadow multiplayer.
-    /// Automatically synced as part of OnlineEntity's EntityState.entityDataStates.
-    /// Auto-registered by Rain Meadow's InitializeBuiltinTypes() which scans all assemblies.
-    /// </summary>
     public class TinkerSilkEntityData : OnlineEntity.EntityData
     {
-        /// <summary>
-        /// State class with [OnlineField] attributes for automatic serialization.
-        /// Non-abstract + extends EntityDataState → auto-registered by Rain Meadow.
-        /// </summary>
-        public class TinkerSilkEntityDataState : EntityDataState
+        internal TinkerSilkEntityDataState Snapshot;
+        internal uint Revision;
+        internal uint AppliedRevision;
+        internal Player AppliedPlayer;
+
+        public override EntityDataState MakeState(OnlineEntity entity, OnlineResource inResource)
         {
-            // ── Synced fields ──────────────────────────────────
-            // SilkMode as int: 0=Retracted, 1=ShootingOut, 2=AttachedToTerrain, 3=AttachedToObject, 4=Retracting
-            [OnlineField("default", false, false, true)]
-            public int mode;
-
-            [OnlineField("default", false, false, true)]
-            public bool attached;
-
-            // Current silk tip position (world space)
-            [OnlineField("default", false, false, true)]
-            public float posX;
-
-            [OnlineField("default", false, false, true)]
-            public float posY;
-
-            // Terrain anchor position (if attached to terrain)
-            [OnlineField("default", false, false, true)]
-            public float terrainAttachX;
-
-            [OnlineField("default", false, false, true)]
-            public float terrainAttachY;
-
-            // Rope length for rendering
-            [OnlineField("default", false, false, true)]
-            public float ropeLength;
-
-            // Visual state — green pull indicator + blue super-jump glow
-            [OnlineField("default", false, false, true)]
-            public bool pullingObject;
-
-            [OnlineField("default", false, false, true)]
-            public int superJumpTimer;
-
-            // ── Constructors ──────────────────────────────────
-            public TinkerSilkEntityDataState() { }
-
-            public TinkerSilkEntityDataState(TinkerSilkEntityData data)
-            {
-                mode = (int)data.Mode;
-                attached = data.Attached;
-                posX = data.PosX;
-                posY = data.PosY;
-                terrainAttachX = data.TerrainAttachX;
-                terrainAttachY = data.TerrainAttachY;
-                ropeLength = data.RopeLength;
-                pullingObject = data.PullingObject;
-                superJumpTimer = data.SuperJumpTimer;
-            }
-
-            // ── EntityDataState implementation ────────────────
-            public override void ReadTo(OnlineEntity.EntityData data, OnlineEntity onlineEntity)
-            {
-                var d = (TinkerSilkEntityData)data;
-                d.Mode = (SilkMode)mode;
-                d.Attached = attached;
-                d.PosX = posX;
-                d.PosY = posY;
-                d.TerrainAttachX = terrainAttachX;
-                d.TerrainAttachY = terrainAttachY;
-                d.RopeLength = ropeLength;
-                d.PullingObject = pullingObject;
-                d.SuperJumpTimer = superJumpTimer;
-                // NOTE: SilkPhysics is NOT updated here to avoid premature creation.
-                // PlayerUpdate → PullSilkState() handles EntityData → SilkPhysics copy
-                // at the right time when isRemote is properly set.
-            }
-
-            public override System.Type GetDataType() => typeof(TinkerSilkEntityData);
+            // Capture at network tick time, after every Player.Update hook has run.
+            if (entity.isMine && entity is OnlinePhysicalObject opo &&
+                opo.apo.realizedObject is Player player && tinkerSilkData.IsTinkerPlayer(player))
+                Snapshot = new TinkerSilkEntityDataState(player, tinkerSilkData.Get(player));
+            return Snapshot ?? new TinkerSilkEntityDataState();
         }
 
-        // ── Runtime data on the entity ────────────────────────
-        public SilkMode Mode = SilkMode.Retracted;
-        public bool Attached;
-        public float PosX, PosY;
-        public float TerrainAttachX, TerrainAttachY;
-        public float RopeLength;
-        public bool PullingObject;
-        public int SuperJumpTimer;
+        public class TinkerSilkEntityDataState : EntityDataState
+        {
+            [OnlineField] public string room = "";
+            [OnlineField] public int mode;
+            [OnlineField] public Vector2 tip;
+            [OnlineField] public Vector2 terrain;
+            [OnlineField] public float ropeLength;
+            [OnlineField] public float requestedLength;
+            [OnlineField] public bool pullingObject;
+            [OnlineField] public int superJumpTimer;
+            [OnlineField] public bool instantDisappear;
+            [OnlineField] public int shotSequence;
+            [OnlineField] public Vector2[] bends = System.Array.Empty<Vector2>();
+            [OnlineField(nullable: true)] public OnlineEntity.EntityId attachedObject;
+            [OnlineField] public float energy = 100f;
+            [OnlineField] public bool exhausted;
+            [OnlineField] public bool building;
+            [OnlineField] public bool firingBridge;
+            [OnlineField] public Vector2 bridgeStart;
+            [OnlineField] public Vector2 bridgeTip;
 
-        public override OnlineEntity.EntityData.EntityDataState MakeState(OnlineEntity entity, OnlineResource inResource)
-            => new TinkerSilkEntityDataState(this);
+            public TinkerSilkEntityDataState() { }
+            public TinkerSilkEntityDataState(Player player, SilkPhysics silk)
+            {
+                room = player.room?.abstractRoom.name ?? "";
+                mode = (int)silk.mode;
+                tip = silk.pos;
+                terrain = silk.terrainStuckPos;
+                ropeLength = silk.idealRopeLength;
+                requestedLength = silk.requestedRopeLength;
+                pullingObject = silk.pullingObject;
+                superJumpTimer = silk.superJumpTimer;
+                instantDisappear = silk.instantDisappear;
+                shotSequence = silk.ShotSequence;
+                bends = silk.CopyNetworkBends();
+                attachedObject = MeadowCompatibility.ObjectId(silk.attachedObject);
+                energy = tinkerSilkData.GetEnergy(player);
+                exhausted = tinkerSilkData.GetExhausted(player);
+                var build = SilkBridgeManager.GetBridgeModeState(player);
+                building = build.active;
+                firingBridge = build.virtualSilkActive || build.animating;
+                bridgeStart = build.point2;
+                bridgeTip = build.virtualSilkPos;
+            }
+
+            public override void ReadTo(OnlineEntity.EntityData data, OnlineEntity onlineEntity)
+            {
+                if (onlineEntity.isMine) return;
+                var silk = (TinkerSilkEntityData)data;
+                silk.Snapshot = this;
+                silk.Revision++;
+            }
+            public override System.Type GetDataType() => typeof(TinkerSilkEntityData);
+        }
     }
 }
 #endif

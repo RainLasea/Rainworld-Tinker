@@ -400,3 +400,6 @@ FodyWeavers.xsd
 *.sln.iml
 
 Weaver.kra
+tests/
+docs/
+mod/newest/plugins/Tinker.dll

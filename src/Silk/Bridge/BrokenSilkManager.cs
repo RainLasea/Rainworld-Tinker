@@ -1,5 +1,5 @@
-using RWCustom;
 using System.Collections.Generic;
+using tinker.Silk;
 using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
 
@@ -17,6 +17,7 @@ namespace Tinker.Silk.Bridge
             On.RoomCamera.DrawUpdate += RoomCamera_DrawUpdate;
             On.Room.Unloaded += Room_Unloaded;
             On.Creature.Update += Creature_Update;
+            On.RainWorldGame.ShutDownProcess += Game_ShutDownProcess;
             initialized = true;
         }
 
@@ -27,20 +28,32 @@ namespace Tinker.Silk.Bridge
             On.RoomCamera.DrawUpdate -= RoomCamera_DrawUpdate;
             On.Room.Unloaded -= Room_Unloaded;
             On.Creature.Update -= Creature_Update;
+            On.RainWorldGame.ShutDownProcess -= Game_ShutDownProcess;
 
+            ClearAnimations();
+            initialized = false;
+        }
+
+        private static void Game_ShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame self)
+        {
+            ClearAnimations();
+            orig(self);
+        }
+
+        private static void ClearAnimations()
+        {
             foreach (var anim in animations)
             {
                 anim.Destroy();
             }
             animations.Clear();
-            initialized = false;
         }
 
         private static void Creature_Update(On.Creature.orig_Update orig, Creature self, bool eu)
         {
             orig(self, eu);
 
-            if (self == null || self is Player || self.room == null || self.slatedForDeletetion)
+            if (self == null || self is Player || !tinker.Silk.RainMeadow.RainMeadowBridge.CanSimulate(self) || self.room == null || self.slatedForDeletetion)
             {
                 return;
             }
@@ -124,7 +137,8 @@ namespace Tinker.Silk.Bridge
             {
                 foreach (var phys in obj)
                 {
-                    if (phys is Weapon weapon && !weapon.slatedForDeletetion)
+                    if (phys is Weapon weapon && !weapon.slatedForDeletetion &&
+                        tinker.Silk.RainMeadow.RainMeadowBridge.CanSimulate(weapon))
                     {
                         if (weapon.thrownBy == null || weapon.mode != Weapon.Mode.Thrown) continue;
 
@@ -166,164 +180,111 @@ namespace Tinker.Silk.Bridge
 
         private static void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed)
         {
-            if (self == null || self.room == null) { orig(self, timeStacker, timeSpeed); return; }
             orig(self, timeStacker, timeSpeed);
+            if (self == null) return;
             foreach (var anim in animations)
             {
-                if (anim?.Room == self.room)
-                {
-                    anim.Draw(self, timeStacker);
-                }
+                // Also detach this camera's old-room meshes after a room switch.
+                anim.Draw(self, timeStacker);
             }
         }
 
-        public static void TriggerBreakAnimation(List<Vector2> path, Room room, Vector2 breakPoint)
+        public static void TriggerFadeAnimation(List<Vector2> path, Room room, bool recoil = false, Color? color = null, float width = 1.2f)
         {
-            if (path == null || path.Count < 2 || room == null) return;
+            AddAnimation(path, room, recoil, false, color ?? new Color(0.9f, 0.9f, 0.9f), width);
+        }
 
-            float bestDist = float.MaxValue;
-            int breakSegmentIndex = -1;
-            for (int i = 0; i < path.Count - 1; i++)
-            {
-                float dist = Custom.DistanceToLine(breakPoint, path[i], path[i + 1]);
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    breakSegmentIndex = i;
-                }
-            }
+        public static void TriggerBreakAnimation(List<Vector2> path, Room room, Vector2 breakPoint,
+            BridgeAnchor startAnchor = null, BridgeAnchor endAnchor = null)
+        {
+            if (room == null || !SilkFade.Split(path, breakPoint, out var left, out var right)) return;
+            float width = path.Count < 2 ? 1f : Mathf.Lerp(1f, 0.65f,
+                Mathf.Clamp01(Vector2.Distance(path[0], path[path.Count - 1]) / 600f));
+            AddAnimation(left, room, true, startAnchor == null || startAnchor.IsValid(room), SilkBridgeGraphics.MainSilkColor, width, startAnchor);
+            AddAnimation(right, room, true, endAnchor == null || endAnchor.IsValid(room), SilkBridgeGraphics.MainSilkColor, width, endAnchor);
+        }
 
-            if (breakSegmentIndex == -1) return;
-
-            List<Vector2> path1 = new List<Vector2>();
-            for (int i = 0; i <= breakSegmentIndex; i++) path1.Add(path[i]);
-            path1.Add(breakPoint);
-
-            List<Vector2> path2 = new List<Vector2>();
-            path2.Add(breakPoint);
-            for (int i = breakSegmentIndex + 1; i < path.Count; i++) path2.Add(path[i]);
-
-            if (path1.Count >= 2) animations.Add(new BrokenSilkAnimation(path1, room));
-            if (path2.Count >= 2) animations.Add(new BrokenSilkAnimation(path2, room));
+        private static void AddAnimation(List<Vector2> path, Room room, bool recoil, bool pinStart, Color color, float width,
+            BridgeAnchor anchor = null)
+        {
+            if (room == null) return;
+            var strand = new SilkFade.Strand(path, recoil, pinStart);
+            if (!strand.Finished) animations.Add(new BrokenSilkAnimation(strand, room, color, width, anchor));
         }
     }
 
     internal class BrokenSilkAnimation
     {
-        public Room Room { get; private set; }
-        public bool IsFinished => fadeAlpha <= 0f;
+        public Room Room { get; }
+        public bool IsFinished => destroyed || strand.Finished;
+        private readonly SilkFade.Strand strand;
+        private readonly Color silkColor;
+        private readonly float width;
+        private readonly BridgeAnchor anchor;
+        private readonly Dictionary<RoomCamera, TriangleMesh> meshes = new();
+        private bool destroyed;
 
-        private TriangleMesh lineMesh;
-        private Vector2[] positions;
-        private Vector2[] lastPositions;
-        private float fadeAlpha = 1f;
-        private float segmentLength;
-        private Color silkColor;
-
-        private const int RENDER_SEGMENTS = 20;
-        private const float FADE_ALPHA_DECAY = 0.015f;
-        private const float FADE_GRAVITY = 0.8f;
-        private const float FADE_FRICTION = 0.92f;
-        private const int PHYSICS_ITERATIONS = 4;
-
-        public BrokenSilkAnimation(List<Vector2> path, Room room)
+        public BrokenSilkAnimation(SilkFade.Strand strand, Room room, Color color, float width, BridgeAnchor anchor)
         {
-            this.Room = room;
-            this.silkColor = new Color(0.9f, 0.9f, 0.9f);
-            positions = new Vector2[RENDER_SEGMENTS];
-            lastPositions = new Vector2[RENDER_SEGMENTS];
-
-            for (int i = 0; i < RENDER_SEGMENTS; i++)
-            {
-                float t = (float)i / (RENDER_SEGMENTS - 1);
-                Vector2 pos = GetPathPoint(path, t);
-                positions[i] = pos;
-                lastPositions[i] = pos - new Vector2(Random.Range(-1.5f, 1.5f), Random.Range(-0.5f, 1f));
-            }
-
-            segmentLength = Vector2.Distance(positions[0], positions[1]);
-            lineMesh = TriangleMesh.MakeLongMesh(RENDER_SEGMENTS, false, true);
-            lineMesh.shader = room.game.rainWorld.Shaders["Basic"];
-        }
-
-        private Vector2 GetPathPoint(List<Vector2> path, float t)
-        {
-            float sourceIndexF = t * (path.Count - 1);
-            int idxA = Mathf.FloorToInt(sourceIndexF);
-            int idxB = Mathf.Min(path.Count - 1, idxA + 1);
-            float localT = sourceIndexF - idxA;
-            return Vector2.Lerp(path[idxA], path[idxB], localT);
+            this.strand = strand;
+            Room = room;
+            silkColor = color;
+            this.width = width;
+            this.anchor = anchor;
         }
 
         public void Update()
         {
             if (IsFinished || Room == null) return;
-            for (int i = 0; i < positions.Length; i++)
+            bool validAnchor = anchor != null && anchor.IsValid(Room);
+            if (anchor != null && !validAnchor) strand.ReleaseAnchor();
+            bool pinned = strand.Pinned;
+            strand.Update(Room.gravity, validAnchor ? anchor.GetWorldPosition() : (Vector2?)null);
+            for (int i = pinned ? 1 : 0; i < strand.Positions.Length; i++)
             {
-                Vector2 vel = (positions[i] - lastPositions[i]) * FADE_FRICTION;
-                lastPositions[i] = positions[i];
-                positions[i] += vel;
-                positions[i].y -= FADE_GRAVITY;
-            }
-            for (int iter = 0; iter < PHYSICS_ITERATIONS; iter++)
-            {
-                for (int i = 0; i < positions.Length - 1; i++)
+                var point = strand.Positions[i];
+                if (Room.GetTile(point).Solid)
                 {
-                    float d = Vector2.Distance(positions[i], positions[i + 1]);
-                    if (d > 0.1f)
-                    {
-                        float diff = (segmentLength - d) / d;
-                        Vector2 offset = (positions[i] - positions[i + 1]) * diff * 0.5f;
-                        positions[i] += offset;
-                        positions[i + 1] -= offset;
-                    }
+                    var rect = Room.TileRect(Room.GetTilePosition(point));
+                    float nearest = Mathf.Min(point.x - rect.left, rect.right - point.x, point.y - rect.bottom, rect.top - point.y);
+                    if (nearest == point.x - rect.left) point.x = rect.left - 0.1f;
+                    else if (nearest == rect.right - point.x) point.x = rect.right + 0.1f;
+                    else if (nearest == point.y - rect.bottom) point.y = rect.bottom - 0.1f;
+                    else point.y = rect.top + 0.1f;
+                    strand.ResolveContact(i, point);
                 }
             }
-            fadeAlpha -= FADE_ALPHA_DECAY;
         }
 
         public void Draw(RoomCamera rCam, float timeStacker)
         {
             if (IsFinished || rCam.room != this.Room)
             {
-                Destroy();
+                if (meshes.TryGetValue(rCam, out var oldMesh))
+                {
+                    oldMesh.RemoveFromContainer();
+                    meshes.Remove(rCam);
+                }
                 return;
             }
-            if (lineMesh.container == null) rCam.ReturnFContainer("Midground").AddChild(lineMesh);
-            lineMesh.isVisible = true;
-            Vector2 camPos = rCam.pos;
-            float baseWidth = 1.2f * Mathf.InverseLerp(0f, 0.3f, fadeAlpha);
-            Vector2 lastP = Vector2.Lerp(lastPositions[0], positions[0], timeStacker);
-            float lastWidth = 0f;
-            for (int i = 0; i < RENDER_SEGMENTS; i++)
+            if (!meshes.TryGetValue(rCam, out var lineMesh))
             {
-                float t = (float)i / (RENDER_SEGMENTS - 1);
-                Vector2 currentP = Vector2.Lerp(lastPositions[i], positions[i], timeStacker);
-                float segmentWidth = baseWidth * (1f - Mathf.Abs(t * 2f - 1f) * 0.2f);
-                Vector2 dir = (currentP - lastP).normalized;
-                if (dir.magnitude < 0.001f) dir = Vector2.up;
-                Vector2 perp = Custom.PerpendicularVector(dir);
-                int v = i * 4;
-                Vector2 hA = perp * ((segmentWidth + lastWidth) * 0.5f);
-                Vector2 hB = perp * segmentWidth;
-                lineMesh.MoveVertice(v, (lastP + currentP) / 2f - hA - camPos);
-                lineMesh.MoveVertice(v + 1, (lastP + currentP) / 2f + hA - camPos);
-                lineMesh.MoveVertice(v + 2, currentP - hB - camPos);
-                lineMesh.MoveVertice(v + 3, currentP + hB - camPos);
-                for (int j = 0; j < 4; j++) lineMesh.verticeColors[v + j] = silkColor;
-                lastP = currentP;
-                lastWidth = segmentWidth;
+                lineMesh = SilkFadeMesh.Create(strand.Positions.Length);
+                lineMesh.shader = rCam.game.rainWorld.Shaders["Basic"];
+                lineMesh.color = silkColor;
+                meshes.Add(rCam, lineMesh);
             }
-            lineMesh.alpha = fadeAlpha;
+            if (lineMesh.container == null) rCam.ReturnFContainer("Midground").AddChild(lineMesh);
+            SilkFadeMesh.Draw(lineMesh, strand.Positions, strand.Previous, timeStacker, rCam.pos,
+                width * Mathf.InverseLerp(0f, 0.3f, strand.Alpha));
+            lineMesh.alpha = strand.Alpha;
         }
 
         public void Destroy()
         {
-            if (lineMesh != null)
-            {
-                lineMesh.RemoveFromContainer();
-                lineMesh = null;
-            }
+            destroyed = true;
+            foreach (var mesh in meshes.Values) mesh.RemoveFromContainer();
+            meshes.Clear();
         }
     }
 }

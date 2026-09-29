@@ -14,7 +14,8 @@ using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker
 {
-    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.5.5")]
+    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.5.8")]
+    [BepInDependency("henpemaz.rainmeadow", BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
         public const string MOD_ID = "abysslasea.tinker";
@@ -79,18 +80,8 @@ namespace tinker
             orig(self);
             if (_isInit) return;
 
-#if RAINMEADOW
-            if (tinker.Silk.RainMeadow.RainMeadowBridge.IsRainMeadowLoaded)
-            {
-                try
-                {
-                    RainMeadow.OnlineState.RegisterState(typeof(tinker.Silk.RainMeadow.TinkerSilkEntityData.TinkerSilkEntityDataState));
-                }
-                catch (System.Exception)
-                {
-                }
-            }
-#endif
+            // Rain Meadow discovers OnlineState/RPC types during its own OnModsInit.
+            // Do not re-register handlers after it has built serialization tables.
 
             OptionalImprovedInput.Initialize();
 
@@ -140,10 +131,8 @@ namespace tinker
 
             bool isTinker = self.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !self.isSlugpup;
 
-            if (isTinker)
+            if (isTinker && !Silk.RainMeadow.RainMeadowBridge.IsOnlineAndRemote(self))
             {
-                bool shouldEnableMouseAim = Options_Hook.MouseAimEnabled;
-                MouseAimSystem.SetMouseAimEnabled(shouldEnableMouseAim, self);
                 TheTinker.UpdateDualSenseLight(self);
             }
         }

@@ -1,22 +1,22 @@
-﻿using RWCustom;
-using UnityEngine;
+using System.Collections.Generic;
 using Tinker.Silk.Bridge;
+using UnityEngine;
 using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker.Mouse
 {
     public static class MouseRender
     {
-        private static FSprite cursorSprite;
-        private static FSprite bridgeAnchorSprite;
-        private static FSprite targetPreviewSprite;
-        private static bool initialized = false;
+        private static readonly Dictionary<HUD.HUD, CursorRenderer> renderers = new();
+        private static bool initialized;
 
         public static void Initialize()
         {
             if (initialized) return;
             On.HUD.HUD.InitSinglePlayerHud += HUD_InitSinglePlayerHud;
             On.HUD.HUD.Update += HUD_Update;
+            On.RoomCamera.DrawUpdate += RoomCamera_DrawUpdate;
+            On.RainWorldGame.ShutDownProcess += Game_ShutDownProcess;
             initialized = true;
         }
 
@@ -25,248 +25,164 @@ namespace tinker.Mouse
             if (!initialized) return;
             On.HUD.HUD.InitSinglePlayerHud -= HUD_InitSinglePlayerHud;
             On.HUD.HUD.Update -= HUD_Update;
-
-            cursorSprite?.RemoveFromContainer();
-            bridgeAnchorSprite?.RemoveFromContainer();
-            targetPreviewSprite?.RemoveFromContainer();
-
-            cursorSprite = null;
-            bridgeAnchorSprite = null;
-            targetPreviewSprite = null;
+            On.RoomCamera.DrawUpdate -= RoomCamera_DrawUpdate;
+            On.RainWorldGame.ShutDownProcess -= Game_ShutDownProcess;
+            foreach (var renderer in renderers.Values) renderer.Remove();
+            renderers.Clear();
             initialized = false;
         }
 
         private static void HUD_InitSinglePlayerHud(On.HUD.HUD.orig_InitSinglePlayerHud orig, HUD.HUD self, RoomCamera cam)
         {
             orig(self, cam);
-            CreateCursorSprites(self.fContainers[1]);
-        }
-
-        private static void CreateCursorSprites(FContainer container)
-        {
-            cursorSprite = new FSprite("Mouse")
-            {
-                color = Color.white,
-                scale = 1f,
-                anchorX = 0.5f,
-                anchorY = 0.5f,
-                alpha = 1f,
-                isVisible = false
-            };
-
-            bridgeAnchorSprite = new FSprite("Circle20")
-            {
-                color = new Color(1f, 0.3f, 0.3f, 1f),
-                scale = 0.5f,
-                anchorX = 0.5f,
-                anchorY = 0.5f,
-                alpha = 1f,
-                isVisible = false
-            };
-
-            targetPreviewSprite = new FSprite("Futile_White")
-            {
-                color = new Color(0.2f, 1f, 0.3f, 0.8f),
-                scale = 0.6f,
-                anchorX = 0.5f,
-                anchorY = 0.5f,
-                alpha = 0f,
-                isVisible = false
-            };
-
-            container.AddChild(cursorSprite);
-            container.AddChild(bridgeAnchorSprite);
-            container.AddChild(targetPreviewSprite);
+            var stale = new List<HUD.HUD>();
+            foreach (var pair in renderers)
+                if (pair.Key == self || pair.Value.Camera.game != cam.game || pair.Value.Camera.hud != pair.Key)
+                {
+                    pair.Value.Remove();
+                    stale.Add(pair.Key);
+                }
+            foreach (var hud in stale) renderers.Remove(hud);
+            renderers[self] = new CursorRenderer(cam, self.fContainers[1]);
         }
 
         private static void HUD_Update(On.HUD.HUD.orig_Update orig, HUD.HUD self)
         {
             orig(self);
-            if (cursorSprite != null && self.owner is Player player)
-            {
-                bool isTinker = player.slugcatStats.name.ToString() == Plugin.SlugName.ToString() && !player.isSlugpup;
-                if (!isTinker)
+            if (renderers.TryGetValue(self, out var renderer)) renderer.UpdatePreview(self.owner as Player);
+        }
+
+        private static void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed)
+        {
+            orig(self, timeStacker, timeSpeed);
+            // Draw after the world so WorldToHud uses this frame's camera origin.
+            // Sample the mouse every render frame without adding smoothing lag.
+            if (self.hud != null && renderers.TryGetValue(self.hud, out var renderer))
+                renderer.Draw(self.hud.owner as Player);
+        }
+
+        private static void Game_ShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame game)
+        {
+            var stale = new List<HUD.HUD>();
+            foreach (var pair in renderers)
+                if (pair.Value.Camera.game == game)
                 {
-                    HideAllSprites();
+                    pair.Value.Remove();
+                    stale.Add(pair.Key);
+                }
+            foreach (var hud in stale) renderers.Remove(hud);
+            orig(game);
+        }
+
+        private sealed class CursorRenderer
+        {
+            internal readonly RoomCamera Camera;
+            private readonly FContainer container;
+            private readonly FSprite cursor, anchor, preview;
+            private bool hasPreview;
+            private Vector2 previewHit;
+            private Room previewRoom;
+            private BridgeModeState previewBridge;
+
+            internal CursorRenderer(RoomCamera camera, FContainer container)
+            {
+                Camera = camera;
+                this.container = container;
+                cursor = new FSprite("Mouse");
+                anchor = new FSprite("Circle20");
+                preview = new FSprite("Futile_White") { rotation = 45f, color = new Color(0.2f, 1f, 0.3f) };
+                container.AddChild(cursor);
+                container.AddChild(anchor);
+                container.AddChild(preview);
+                Hide();
+            }
+
+            internal void Remove()
+            {
+                cursor.RemoveFromContainer();
+                anchor.RemoveFromContainer();
+                preview.RemoveFromContainer();
+            }
+
+            private void Hide()
+            {
+                cursor.isVisible = anchor.isVisible = preview.isVisible = false;
+            }
+
+            private bool CanDraw(Player player)
+            {
+                if (!MouseAimSystem.IsLocalPlayer(player) || player.room != Camera.room ||
+                    Camera.game.paused || player.dead) return false;
+                return GamepadBridgeState.GetOrCreate(player).aiming ||
+                    (!MouseAimSystem.IsGamepadActive(player) && MouseAimSystem.IsMouseAimEnabled(player));
+            }
+
+            internal void UpdatePreview(Player player)
+            {
+                hasPreview = false;
+                previewRoom = null;
+                previewBridge = null;
+                if (!CanDraw(player))
+                {
+                    Hide();
                     return;
                 }
 
-                var gpState = Tinker.Silk.Bridge.GamepadBridgeState.GetOrCreate(player);
-                if (gpState.aiming)
-                {
-                    UpdateGamepadCursor(player, gpState);
-                }
-                else if (player.input[0].gamePad || gpState.gamepadConnected)
-                {
-                    HideAllSprites();
-                }
-                else if (MouseAimSystem.IsMouseAimEnabled())
-                {
-                    // Mouse mode: show mouse cursor
-                    UpdateCursorPosition(player);
-                }
-                else
-                {
-                    HideAllSprites();
-                }
+                var bridge = SilkBridgeManager.GetBridgeModeState(player);
+                if (bridge?.active != true) return;
+                var gamepad = GamepadBridgeState.GetOrCreate(player);
+                Vector2 target;
+                if (gamepad.aiming) target = gamepad.aimWorldPos;
+                else if (!MouseAimSystem.TryGetMouseWorldPosition(player, out target)) return;
+
+                // Collision prediction can trace up to 30 simulation steps. Cache
+                // the result at the logic rate instead of repeating it per draw.
+                hasPreview = bridge.TryGetVirtualSilkPreviewHit(player, target, out previewHit);
+                previewRoom = player.room;
+                previewBridge = bridge;
             }
-        }
 
-        private static void UpdateCursorPosition(Player player)
-        {
-            if (cursorSprite == null) return;
-
-            Vector2 mousePos = Futile.mousePosition;
-            var bridgeState = SilkBridgeManager.GetBridgeModeState(player);
-            bool inBridgeMode = bridgeState != null && bridgeState.active;
-
-            if (inBridgeMode)
+            internal void Draw(Player player)
             {
-                cursorSprite.x = mousePos.x;
-                cursorSprite.y = mousePos.y;
-                cursorSprite.alpha = 0.5f;
-                cursorSprite.color = Color.white;
-                cursorSprite.scale = 0.8f;
-                cursorSprite.isVisible = true;
+                Hide();
+                if (!CanDraw(player)) return;
 
-                var cam = MouseAimSystem.GetCurrentCamera();
-                if (cam != null)
+                var gamepad = GamepadBridgeState.GetOrCreate(player);
+                bool aiming = gamepad.aiming;
+                var bridge = SilkBridgeManager.GetBridgeModeState(player);
+                bool building = bridge?.active == true;
+                Vector2 screen = aiming ? MouseAimSystem.WorldToHud(Camera, container, gamepad.aimWorldPos)
+                    : container.ScreenToLocal(Futile.mousePosition);
+                cursor.SetPosition(screen);
+                cursor.color = aiming ? new Color(0.3f, 0.8f, 1f) : Color.white;
+                cursor.scale = aiming ? 0.85f : building ? 0.8f : 1f;
+                cursor.alpha = aiming ? 0.9f : building ? 0.5f : 1f;
+                cursor.isVisible = true;
+
+                if (building)
                 {
-                    Vector2 anchorScreenPos = bridgeState.point2 - cam.pos;
-                    bridgeAnchorSprite.x = anchorScreenPos.x;
-                    bridgeAnchorSprite.y = anchorScreenPos.y;
-                    bridgeAnchorSprite.isVisible = true;
-
-                    float pulse = 0.5f + Mathf.Sin(Time.time * 6f) * 0.08f;
-                    bridgeAnchorSprite.scale = pulse;
-                    bridgeAnchorSprite.alpha = 0.85f + Mathf.Sin(Time.time * 6f) * 0.15f;
-                    bridgeAnchorSprite.color = new Color(1f, 0.2f, 0.2f, 1f);
-
-                    UpdateTargetPreview(player, cam, bridgeState);
+                    anchor.SetPosition(MouseAimSystem.WorldToHud(Camera, container, bridge.point2));
+                    anchor.scale = 0.5f + Mathf.Sin(Time.time * 6f) * 0.08f;
+                    anchor.alpha = 0.85f + Mathf.Sin(Time.time * 6f) * 0.15f;
+                    anchor.color = new Color(1f, 0.2f, 0.2f);
+                    anchor.isVisible = true;
+                    if (hasPreview && previewRoom == player.room && previewBridge == bridge)
+                    {
+                        preview.SetPosition(MouseAimSystem.WorldToHud(Camera, container, previewHit));
+                        preview.scale = 0.6f + Mathf.Sin(Time.time * 8f) * 0.15f;
+                        preview.alpha = 0.7f + Mathf.Sin(Time.time * 8f) * 0.2f;
+                        preview.isVisible = true;
+                    }
                 }
-            }
-            else
-            {
-                cursorSprite.x = mousePos.x;
-                cursorSprite.y = mousePos.y;
-                cursorSprite.alpha = 1f;
-                cursorSprite.color = Color.white;
-                cursorSprite.scale = 1f;
-                cursorSprite.isVisible = true;
-                bridgeAnchorSprite.isVisible = false;
-                targetPreviewSprite.isVisible = false;
-            }
-        }
-
-        private static void UpdateTargetPreview(Player player, RoomCamera cam, BridgeModeState bridgeState)
-        {
-            Vector2 mouseWorldPos = new Vector2(Futile.mousePosition.x + cam.pos.x, Futile.mousePosition.y + cam.pos.y);
-            UpdateTargetPreview(player, cam, bridgeState, mouseWorldPos);
-        }
-
-        private static void UpdateTargetPreview(Player player, RoomCamera cam, BridgeModeState bridgeState, Vector2 targetWorldPos)
-        {
-            if (targetPreviewSprite == null || player.room == null) return;
-
-            if (bridgeState.TryGetVirtualSilkPreviewHit(player, targetWorldPos, out Vector2 hitPoint))
-            {
-                Vector2 screenPos = hitPoint - cam.pos;
-                targetPreviewSprite.x = screenPos.x;
-                targetPreviewSprite.y = screenPos.y;
-                targetPreviewSprite.isVisible = true;
-
-                float breathe = 0.6f + Mathf.Sin(Time.time * 8f) * 0.15f;
-                targetPreviewSprite.scale = breathe;
-                targetPreviewSprite.alpha = 0.7f + Mathf.Sin(Time.time * 8f) * 0.2f;
-                targetPreviewSprite.rotation = 45f;
-
-                targetPreviewSprite.SetElementByName("Futile_White");
-            }
-            else
-            {
-                targetPreviewSprite.isVisible = false;
-            }
-        }
-
-        private static void DrawDiamondShape(FSprite sprite)
-        {
-            if (sprite.element.name != "DiamondPreview")
-            {
-                FAtlasElement diamondElement = Futile.atlasManager.GetElementWithName("pixel");
-                if (diamondElement != null)
+                else if (aiming && gamepad.rtHeld)
                 {
-                    sprite.SetElementByName("pixel");
-                    sprite.scaleX = 0.8f;
-                    sprite.scaleY = 0.8f;
+                    anchor.SetPosition(screen);
+                    anchor.scale = (0.6f + Mathf.Sin(Time.time * 8f) * 0.1f) * 0.6f;
+                    anchor.alpha = 0.7f + Mathf.Sin(Time.time * 8f) * 0.2f;
+                    anchor.color = new Color(0.3f, 1f, 0.5f);
+                    anchor.isVisible = true;
                 }
             }
-        }
-
-        private static void HideAllSprites()
-        {
-            if (cursorSprite != null) cursorSprite.isVisible = false;
-            if (bridgeAnchorSprite != null) bridgeAnchorSprite.isVisible = false;
-            if (targetPreviewSprite != null) targetPreviewSprite.isVisible = false;
-        }
-
-        private static void UpdateGamepadCursor(Player player, GamepadBridgeState gpState)
-        {
-            if (cursorSprite == null) return;
-
-            var cam = MouseAimSystem.GetCurrentCamera();
-            if (cam == null)
-            {
-                HideAllSprites();
-                return;
-            }
-
-            Vector2 screenPos = gpState.aimWorldPos - cam.pos;
-
-            // Gamepad cursor: blue-tinted, slightly smaller
-            cursorSprite.x = screenPos.x;
-            cursorSprite.y = screenPos.y;
-            cursorSprite.alpha = 0.9f;
-            cursorSprite.color = new Color(0.3f, 0.8f, 1f);
-            cursorSprite.scale = 0.85f;
-            cursorSprite.isVisible = true;
-
-            // Bridge anchor preview at the silk's attached position
-            var bridgeState = SilkBridgeManager.GetBridgeModeState(player);
-            bool inBridgeMode = bridgeState != null && bridgeState.active;
-
-            if (inBridgeMode)
-            {
-                Vector2 anchorScreenPos = bridgeState.point2 - cam.pos;
-                bridgeAnchorSprite.x = anchorScreenPos.x;
-                bridgeAnchorSprite.y = anchorScreenPos.y;
-                bridgeAnchorSprite.isVisible = true;
-
-                float pulse = 0.5f + Mathf.Sin(Time.time * 6f) * 0.08f;
-                bridgeAnchorSprite.scale = pulse;
-                bridgeAnchorSprite.alpha = 0.85f + Mathf.Sin(Time.time * 6f) * 0.15f;
-                bridgeAnchorSprite.color = new Color(1f, 0.2f, 0.2f, 1f);
-            }
-            else if (gpState.rtHeld)
-            {
-                // RT held → show target preview at cursor
-                bridgeAnchorSprite.x = screenPos.x;
-                bridgeAnchorSprite.y = screenPos.y;
-                bridgeAnchorSprite.isVisible = true;
-
-                float pulse = 0.6f + Mathf.Sin(Time.time * 8f) * 0.1f;
-                bridgeAnchorSprite.scale = pulse * 0.6f;
-                bridgeAnchorSprite.alpha = 0.7f + Mathf.Sin(Time.time * 8f) * 0.2f;
-                bridgeAnchorSprite.color = new Color(0.3f, 1f, 0.5f);
-            }
-            else
-            {
-                bridgeAnchorSprite.isVisible = false;
-            }
-
-            if (inBridgeMode)
-                UpdateTargetPreview(player, cam, bridgeState, gpState.aimWorldPos);
-            else
-                targetPreviewSprite.isVisible = false;
         }
     }
 }

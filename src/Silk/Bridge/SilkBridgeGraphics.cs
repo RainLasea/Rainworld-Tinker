@@ -10,11 +10,13 @@ namespace Tinker.Silk.Bridge
 {
     public static class SilkBridgeGraphics
     {
+        internal static readonly Color MainSilkColor = new Color(0.95f, 0.95f, 0.95f, 1f);
         private sealed class CameraRenderers
         {
             public Room room;
             public readonly List<BridgeRenderer> bridges = new();
             public readonly Dictionary<Player, AnimatedSilkRenderer> animated = new();
+            public SilkBridgeDetails details;
 
             public void Clear()
             {
@@ -22,6 +24,7 @@ namespace Tinker.Silk.Bridge
                 foreach (var renderer in animated.Values) renderer.Destroy();
                 bridges.Clear();
                 animated.Clear();
+                details?.Destroy(); details = null;
                 room = null;
             }
         }
@@ -99,6 +102,8 @@ namespace Tinker.Silk.Bridge
                 renderers.Add(new BridgeRenderer(self));
             for (int i = 0; i < bridges.Count; i++)
                 renderers[i].Draw(bridges[i], self, timeStacker);
+            if (state.details == null) state.details = new SilkBridgeDetails(self);
+            state.details.Draw(bridges, self, timeStacker);
 
             foreach (var player in state.animated.Keys.Where(player => player.slatedForDeletetion || player.room != self.room).ToArray())
             {
@@ -126,7 +131,8 @@ namespace Tinker.Silk.Bridge
         private class BridgeRenderer
         {
             private TriangleMesh mesh;
-            private const int MAX_SEGMENTS = 161;
+            private const int MAX_SEGMENTS = 321;
+            private readonly Vector2[] points = new Vector2[MAX_SEGMENTS];
 
             public BridgeRenderer(RoomCamera cam)
             {
@@ -138,13 +144,13 @@ namespace Tinker.Silk.Bridge
                     tris[i * 2 + 1] = new TriangleMesh.Triangle(vertIndex + 1, vertIndex + 2, vertIndex + 3);
                 }
                 mesh = new TriangleMesh("Futile_White", tris, false, false);
-                mesh.color = new Color(0.95f, 0.95f, 0.95f, 1f);
+                mesh.color = MainSilkColor;
                 cam.ReturnFContainer("Midground").AddChild(mesh);
             }
 
             public void Draw(SilkBridge bridge, RoomCamera cam, float timeStacker)
             {
-                if (bridge == null || bridge.room != cam.room)
+                if (bridge == null || !bridge.IsActive || bridge.room != cam.room)
                 {
                     mesh.isVisible = false;
                     return;
@@ -155,15 +161,20 @@ namespace Tinker.Silk.Bridge
 
                 float currentDist = Vector2.Distance(bridge.startPoint, bridge.endPoint);
                 int edges = bridge.VisualEdgeCount;
-                int subdivisions = Mathf.Clamp(Mathf.CeilToInt(currentDist / (6f * edges)), 1, Mathf.Max(1, (MAX_SEGMENTS - 1) / edges));
+                int subdivisions = Mathf.Clamp(Mathf.CeilToInt(currentDist / (3f * edges)), 1, Mathf.Max(1, (MAX_SEGMENTS - 1) / edges));
                 int segmentCount = Mathf.Min(edges * subdivisions, MAX_SEGMENTS - 1);
                 float stretchFactor = Mathf.Clamp01(currentDist / 600f);
                 float baseWidth = Mathf.Lerp(2f, 1.3f, stretchFactor);
 
+                for (int i = 0; i <= segmentCount; i++)
+                {
+                    points[i] = bridge.GetVisualPoint(bridge.GetVisualParameter((float)i / segmentCount), timeStacker);
+                }
+
                 for (int i = 0; i < segmentCount; i++)
                 {
-                    Vector2 segStart = bridge.GetVisualPoint(bridge.GetVisualParameter((float)i / segmentCount), timeStacker);
-                    Vector2 segEnd = bridge.GetVisualPoint(bridge.GetVisualParameter((float)(i + 1) / segmentCount), timeStacker);
+                    Vector2 segStart = points[i];
+                    Vector2 segEnd = points[i + 1];
                     Vector2 segDir = (segEnd - segStart).normalized;
                     Vector2 perpendicular = Custom.PerpendicularVector(segDir);
 
@@ -185,8 +196,14 @@ namespace Tinker.Silk.Bridge
                 }
             }
 
-            public void SetVisible(bool visible) { if (mesh != null) mesh.isVisible = visible; }
-            public void Destroy() { if (mesh != null) { mesh.RemoveFromContainer(); mesh = null; } }
+            public void SetVisible(bool visible)
+            {
+                if (mesh != null) mesh.isVisible = visible;
+            }
+            public void Destroy()
+            {
+                if (mesh != null) { mesh.RemoveFromContainer(); mesh = null; }
+            }
         }
 
         private class AnimatedSilkRenderer

@@ -1,148 +1,131 @@
 using System;
 using System.Linq;
+using Tinker.Silk.Bridge;
 using UnityEngine;
-#if RAINMEADOW
-using RainMeadow;
-#endif
 
 namespace tinker.Silk.RainMeadow
 {
-    /// <summary>
-    /// Bridge between Tinker's silk system and Rain Meadow's OnlineEntity sync system.
-    /// Handles attaching TinkerSilkEntityData to the OnlineEntity and keeping it in sync.
-    /// All references to Rain Meadow types are conditionally compiled.
-    /// </summary>
+    // This facade must contain no Rain Meadow types in fields, signatures or method bodies.
+    // Its implementation lives behind non-inlined calls so the same DLL loads without RM.
     public static class RainMeadowBridge
     {
-        private static bool? _available;
-        private static bool _checked;
-
-        /// <summary>
-        /// Checks if Rain Meadow is loaded in the current AppDomain.
-        /// Safe to call without try-catch — just checks assembly names.
-        /// </summary>
-        public static bool IsRainMeadowLoaded
+        private static bool available;
+        static RainMeadowBridge()
+        {
+            available = AppDomain.CurrentDomain.GetAssemblies().Any(a => IsMeadowAssembly(a.GetName().Name));
+            // A negative result during another plugin's OnEnable must not stick forever.
+            AppDomain.CurrentDomain.AssemblyLoad += (_, args) =>
+            {
+                if (IsMeadowAssembly(args.LoadedAssembly.GetName().Name)) available = true;
+            };
+        }
+        private static bool IsMeadowAssembly(string name) =>
+            name.Replace(" ", "").Equals("RainMeadow", StringComparison.OrdinalIgnoreCase);
+        public static bool IsRainMeadowLoaded => available;
+        public static bool IsOnline
         {
             get
             {
-                if (!_checked)
-                {
-                    _checked = true;
-                    try
-                    {
-                        _available = AppDomain.CurrentDomain.GetAssemblies()
-                            .Any(a => a.GetName().Name.Replace(" ", "").Equals("RainMeadow", StringComparison.OrdinalIgnoreCase));
-                    }
-                    catch
-                    {
-                        _available = false;
-                    }
-                }
-                return _available ?? false;
+#if RAINMEADOW
+                return IsRainMeadowLoaded && MeadowCompatibility.IsOnline();
+#else
+                return false;
+#endif
             }
         }
 
-        /// <summary>
-        /// Attach TinkerSilkEntityData to the Player's OnlineEntity.
-        /// </summary>
+        public static bool IsOnlineAndRemote(Player player) => !CanSimulate(player);
+        public static bool CanSimulate(PhysicalObject obj)
+        {
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) return MeadowCompatibility.CanSimulate(obj);
+#endif
+            return true;
+        }
+
+        public static bool CanMoveObject(PhysicalObject obj)
+        {
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) return MeadowCompatibility.CanMoveObject(obj);
+#endif
+            return true;
+        }
+
         public static void AttachSilkData(Player player)
         {
-            if (!IsRainMeadowLoaded) return;
 #if RAINMEADOW
-            var opo = GetOnlinePhysicalObject(player);
-            if (opo == null) return;
-
-            if (opo.TryGetData<TinkerSilkEntityData>(out _)) return;
-
-            var data = new TinkerSilkEntityData();
-            opo.AddData(data);
+            if (IsRainMeadowLoaded) MeadowCompatibility.AttachSilkData(player);
 #endif
         }
 
-        /// <summary>
-        /// Push local SilkPhysics state into the OnlineEntity's TinkerSilkEntityData.
-        /// </summary>
         public static void PushSilkState(Player player, SilkPhysics silk)
         {
-            if (!IsRainMeadowLoaded) return;
 #if RAINMEADOW
-            var opo = GetOnlinePhysicalObject(player);
-            if (opo == null) return;
-
-            if (!opo.TryGetData<TinkerSilkEntityData>(out var data))
-            {
-                data = new TinkerSilkEntityData();
-                opo.AddData(data);
-            }
-
-            data.Mode = silk.mode;
-            data.Attached = silk.Attached;
-            data.PosX = silk.pos.x;
-            data.PosY = silk.pos.y;
-            data.TerrainAttachX = silk.terrainStuckPos.x;
-            data.TerrainAttachY = silk.terrainStuckPos.y;
-            data.RopeLength = silk.idealRopeLength;
-            data.PullingObject = silk.pullingObject;
-            data.SuperJumpTimer = silk.superJumpTimer;
+            if (IsRainMeadowLoaded) MeadowCompatibility.PushSilkState(player, silk);
 #endif
         }
 
-        /// <summary>
-        /// Pull synced silk state from the OnlineEntity into local SilkPhysics.
-        /// </summary>
         public static bool PullSilkState(Player player, SilkPhysics silk)
         {
-            if (!IsRainMeadowLoaded) return false;
 #if RAINMEADOW
-            var opo = GetOnlinePhysicalObject(player);
-            if (opo == null) return false;
-
-            if (!opo.TryGetData<TinkerSilkEntityData>(out var data)) return false;
-
-            silk.mode = data.Mode;
-            silk.pos = new Vector2(data.PosX, data.PosY);
-            silk.lastPos = silk.pos;
-            silk.terrainStuckPos = new Vector2(data.TerrainAttachX, data.TerrainAttachY);
-            silk.idealRopeLength = data.RopeLength;
-            silk.requestedRopeLength = data.RopeLength;
-            silk.pullingObject = data.PullingObject;
-            silk.superJumpTimer = data.SuperJumpTimer;
-            return true;
-#else
-            return false;
+            if (IsRainMeadowLoaded) return MeadowCompatibility.PullSilkState(player, silk);
 #endif
+            return false;
         }
 
         public static bool HasSilkData(Player player)
         {
-            if (!IsRainMeadowLoaded) return false;
 #if RAINMEADOW
-            var opo = GetOnlinePhysicalObject(player);
-            if (opo == null) return false;
-            return opo.TryGetData<TinkerSilkEntityData>(out _);
-#else
+            if (IsRainMeadowLoaded) return MeadowCompatibility.HasSilkData(player);
+#endif
             return false;
+        }
+
+        public static bool UpdateRoom(Room room)
+        {
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) return MeadowCompatibility.UpdateRoom(room);
+#endif
+            return false;
+        }
+
+        public static void UnloadRoom(Room room)
+        {
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) MeadowCompatibility.UnloadRoom(room);
 #endif
         }
 
-#if RAINMEADOW
-        private static OnlinePhysicalObject GetOnlinePhysicalObject(Player player)
+        public static bool CanCreateBridge(Player player)
         {
-            if (player?.abstractPhysicalObject == null) return null;
-            OnlinePhysicalObject.map.TryGetValue(player.abstractPhysicalObject, out var opo);
-            return opo;
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) return MeadowCompatibility.CanCreateBridge(player);
+#endif
+            return true;
         }
-#endif
 
-        public static bool IsOnlineAndRemote(Player player)
+        public static bool SubmitBridge(Player player, SilkBridge bridge, Action onRejected)
         {
-            if (!IsRainMeadowLoaded) return false;
 #if RAINMEADOW
-            var opo = GetOnlinePhysicalObject(player);
-            return opo != null && !opo.isMine;
-#else
-            return false;
+            if (IsRainMeadowLoaded) return MeadowCompatibility.SubmitBridge(player, bridge, onRejected);
 #endif
+            return false;
+        }
+
+        public static bool RelayForce(SilkBridge bridge, Vector2 point, Vector2 force)
+        {
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) return MeadowCompatibility.RelayForce(bridge, point, force);
+#endif
+            return false;
+        }
+
+        public static bool RelayDamage(SilkBridge bridge, float amount, Vector2 point)
+        {
+#if RAINMEADOW
+            if (IsRainMeadowLoaded) return MeadowCompatibility.RelayDamage(bridge, amount, point);
+#endif
+            return false;
         }
     }
 }
