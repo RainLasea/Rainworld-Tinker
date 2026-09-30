@@ -14,8 +14,9 @@ using static Tinker.Silk.Bridge.BridgeModeState;
 
 namespace tinker
 {
-    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.5.8")]
+    [BepInPlugin("abysslasea.tinker", "The Tinker", "0.5.81")]
     [BepInDependency("henpemaz.rainmeadow", BepInDependency.DependencyFlags.SoftDependency)]
+    [BepInDependency("SimplifiedMoveset", BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
         public const string MOD_ID = "abysslasea.tinker";
@@ -47,6 +48,7 @@ namespace tinker
             SilkBridgeGraphics.Initialize();
             BrokenSilkManager.Initialize();
             SilkClimb.Init();
+            SimplifiedMovesetCompatibility.Init(_harmony);
             PlayerGraphicsHooks.Init();
             TinkerLanguageHint.Init();
             On.Player.Update += Player_Update;
